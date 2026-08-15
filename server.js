@@ -9,12 +9,12 @@ const PORT = process.env.PORT || 3000;
 const DATA_FILE = './data.json';
 
 // ==========================================
-// 🗂️ 데이터베이스 세팅 (서버별 보안 데이터)
+// 🗂️ 데이터베이스 세팅
 // ==========================================
 let botData = { 
     serverLogs: {}, 
     ownerDMs: [], 
-    serverBlacklists: {},     // 타서버(Guild) ID 차단 목록으로 사용됨
+    serverBlacklists: {},     
     serverIpBlacklists: {},   
     ipRecords: {}, 
     altLimits: {},
@@ -43,7 +43,6 @@ const commands = [
         .addRoleOption(option => option.setName('역할').setDescription('인증 성공 시 지급할 역할(팀)').setRequired(true))
         .addChannelOption(option => option.setName('채널').setDescription('패널을 설치할 채널 (미입력 시 현재 채널)').setRequired(false)),
     
-    // 🛑 타서버 차단 관련 명령어 (유저 -> 서버아이디 문자열로 변경)
     new SlashCommandBuilder().setName('서버차단').setDescription('특정 타서버에 소속된 유저의 인증을 차단하고 킥합니다.')
         .addStringOption(option => option.setName('서버아이디').setDescription('차단할 타서버의 ID').setRequired(true)),
     new SlashCommandBuilder().setName('서버차단해제').setDescription('특정 타서버의 차단을 해제합니다.')
@@ -51,7 +50,7 @@ const commands = [
     new SlashCommandBuilder().setName('서버차단목록').setDescription('차단된 타서버 ID 목록을 확인합니다.'),
     
     new SlashCommandBuilder().setName('ip차단').setDescription('특정 IP 주소의 웹 인증을 차단합니다.')
-        .addStringOption(option => option.setName('아이피').setDescription('차단할 IP 주소 (예: 123.45.67.89)').setRequired(true)),
+        .addStringOption(option => option.setName('아이피').setDescription('차단할 IP 주소').setRequired(true)),
     new SlashCommandBuilder().setName('ip차단해제').setDescription('특정 IP 주소의 차단을 해제합니다.')
         .addStringOption(option => option.setName('아이피').setDescription('해제할 IP 주소').setRequired(true)),
 
@@ -68,9 +67,6 @@ client.once('ready', async () => {
     console.log('✅ 슬래시 명령어 세팅 완료!');
 });
 
-// ==========================================
-// 💬 명령어 처리 로직
-// ==========================================
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
@@ -117,10 +113,7 @@ client.on('interactionCreate', async interaction => {
 
         await channel.send({ embeds: [embed], components: [row] });
         await interaction.reply({ content: `✅ 성공적으로 패널을 설치했습니다! (지급 역할: ${role.name})`, ephemeral: true });
-    } 
-    
-    // 🛑 타서버 차단 로직 적용
-    else if (commandName === '서버차단') {
+    } else if (commandName === '서버차단') {
         const targetServerId = interaction.options.getString('서버아이디').trim();
         if (!botData.serverBlacklists[guildId]) botData.serverBlacklists[guildId] = [];
         if (!botData.serverBlacklists[guildId].includes(targetServerId)) botData.serverBlacklists[guildId].push(targetServerId);
@@ -137,9 +130,7 @@ client.on('interactionCreate', async interaction => {
         const list = botData.serverBlacklists[guildId] || [];
         const serverList = list.join('\n') || '차단된 타서버가 없습니다.';
         await interaction.reply({ content: `📜 **차단된 타서버 ID 목록:**\n${serverList}`, ephemeral: true });
-    } 
-
-    else if (commandName === 'ip차단') {
+    } else if (commandName === 'ip차단') {
         const ip = interaction.options.getString('아이피').trim();
         if (!botData.serverIpBlacklists[guildId]) botData.serverIpBlacklists[guildId] = [];
         if (!botData.serverIpBlacklists[guildId].includes(ip)) botData.serverIpBlacklists[guildId].push(ip);
@@ -157,12 +148,12 @@ client.on('interactionCreate', async interaction => {
         let result = [];
         for (const [ip, users] of Object.entries(serverIps)) {
             if (users.length > 1) {
-                result.push(`**IP [ ${ip} ]**\n └ 계정: ${users.map(id => `<@${id}>`).join(', ')}`);
+                result.push(`**IP [ ${ip} ]** (총 ${users.length}개 계정)\n └ 계정: ${users.map(id => `<@${id}>`).join(', ')}`);
             }
         }
         if (result.length === 0) return interaction.reply({ content: '✅ 다중 계정(부계)으로 의심되는 IP 접근 기록이 없습니다.', ephemeral: true });
         
-        let replyMsg = `🚨 **다중 계정 접속 의심 로그** 🚨\n\n${result.join('\n\n')}`;
+        let replyMsg = `🚨 **동일 IP 다중 계정(부계정) 추적 결과** 🚨\n\n${result.join('\n\n')}`;
         if (replyMsg.length > 2000) replyMsg = replyMsg.slice(0, 1995) + '...';
         await interaction.reply({ content: replyMsg, ephemeral: true });
     } else if (commandName === '부계차단설정') {
@@ -180,7 +171,88 @@ client.on('interactionCreate', async interaction => {
 });
 
 // ==========================================
-// 🌍 웹 서버 세팅 (웹 페이지 및 콜백)
+// 🎨 HTML 렌더링 템플릿
+// ==========================================
+const getErrorHTML = (title, message, icon = '❌') => `
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${title}</title>
+    <style>
+        @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+        body { background-color: #1e1f22; color: #dbdee1; font-family: 'Pretendard', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .box { background-color: #2b2d31; padding: 40px; border-radius: 12px; border-top: 6px solid #ed4245; box-shadow: 0 8px 24px rgba(0,0,0,0.3); text-align: center; max-width: 400px; }
+        h1 { color: #ed4245; margin-top: 0; font-size: 24px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+        p { font-size: 15px; color: #b5bac1; line-height: 1.6; margin-bottom: 0; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>${icon} ${title}</h1>
+        <p>${message}</p>
+    </div>
+</body>
+</html>
+`;
+
+const getSuccessHTML = (user, ip) => {
+    const avatarUrl = user.avatar 
+        ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=256` 
+        : `https://cdn.discordapp.com/embed/avatars/0.png`;
+    
+    let bannerStyle = 'background-color: #5865F2;';
+    if (user.banner) {
+        bannerStyle = `background-image: url('https://cdn.discordapp.com/banners/${user.id}/${user.banner}.png?size=512'); background-size: cover; background-position: center;`;
+    } else if (user.accent_color) {
+        bannerStyle = `background-color: #${user.accent_color.toString(16).padStart(6, '0')};`;
+    }
+
+    return `
+    <!DOCTYPE html>
+    <html lang="ko">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>인증 완료</title>
+        <style>
+            @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+            body { background-color: #1e1f22; color: #dbdee1; font-family: 'Pretendard', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+            .card { background-color: #2b2d31; width: 340px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); overflow: hidden; position: relative; }
+            .banner { width: 100%; height: 120px; ${bannerStyle} }
+            .avatar-wrapper { position: absolute; top: 76px; left: 16px; width: 92px; height: 92px; border-radius: 50%; background-color: #2b2d31; display: flex; justify-content: center; align-items: center; }
+            .avatar { width: 80px; height: 80px; border-radius: 50%; background-image: url('${avatarUrl}'); background-size: cover; background-position: center; }
+            .content { padding: 55px 20px 20px; }
+            .username { font-size: 20px; font-weight: 700; color: #f2f3f5; margin: 0; }
+            .userid { font-size: 14px; color: #b5bac1; margin-top: 4px; }
+            .info-box { background-color: #1e1f22; border-radius: 8px; padding: 12px; margin-top: 20px; text-align: center; border: 1px solid #313338; }
+            .ip-label { font-size: 12px; color: #949ba4; text-transform: uppercase; font-weight: 800; letter-spacing: 0.5px; }
+            .ip-value { font-size: 18px; color: #f2f3f5; margin-top: 6px; font-family: monospace; }
+            .footer { text-align: center; font-size: 11px; color: #80848e; margin-top: 20px; font-weight: 500; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div class="banner"></div>
+            <div class="avatar-wrapper"><div class="avatar"></div></div>
+            <div class="content">
+                <h2 class="username">${user.global_name || user.username}</h2>
+                <div class="userid">@${user.username}</div>
+                <div class="info-box">
+                    <div class="ip-label">인증된 접속 IP</div>
+                    <div class="ip-value">${ip}</div>
+                </div>
+                <div class="footer">✅ 인증이 완료되었습니다. 이 창을 닫아주세요.</div>
+            </div>
+        </div>
+    </body>
+    </html>
+    `;
+};
+
+// ==========================================
+// 🌍 웹 서버 세팅
 // ==========================================
 app.set('trust proxy', true);
 
@@ -192,13 +264,12 @@ function getClientIp(req) {
 
 app.get('/auth/discord/callback', async (req, res) => {
     const { code, state: guildId } = req.query; 
-    if (!code || !guildId) return res.send('<h2 style="color:red;text-align:center;margin-top:50px;">❌ 비정상적인 접근입니다.</h2>');
+    if (!code || !guildId) return res.send(getErrorHTML('비정상적인 접근', '유효하지 않은 요청입니다. 디스코드에서 다시 시도해주세요.'));
 
     const userIP = getClientIp(req);
     let ipInfoText = '기본 IP만 수집됨';
     let isVpnOrProxy = false;
 
-    // ProxyCheck 
     try {
         const apiKey = process.env.PROXYCHECK_API_KEY || '';
         if(apiKey) {
@@ -213,7 +284,11 @@ app.get('/auth/discord/callback', async (req, res) => {
     } catch (e) { console.error("ProxyCheck 에러:", e.message); }
 
     if (isVpnOrProxy) {
-        return res.send('<h1 style="color:red;text-align:center;">🛡️ VPN/프록시 접속 차단됨</h1>');
+        return res.send(getErrorHTML(
+            'VPN/Proxy 감지됨', 
+            '보안을 위해 VPN 또는 우회 프로그램을 켠 상태로는 인증할 수 없습니다.<br><br><b style="color:white; font-size:16px;">VPN을 끄고 다시 부탁드립니다.</b>',
+            '🛡️'
+        ));
     }
 
     try {
@@ -229,58 +304,48 @@ app.get('/auth/discord/callback', async (req, res) => {
         });
         const userData = userRes.data;
 
-        // ==========================================
-        // 🔍 1. 유저가 가입된 전체 서버 목록 확인 (핵심)
-        // ==========================================
         const guildsRes = await axios.get('https://discord.com/api/users/@me/guilds', {
             headers: { Authorization: `Bearer ${tokenRes.data.access_token}` }
         });
         const userGuilds = guildsRes.data;
 
-        // 1-1. 우리 서버에 있는지 1차 확인
         const isInServer = userGuilds.some(guild => guild.id === guildId);
         if (!isInServer) {
-            return res.send('<h2 style="color:red;text-align:center;margin-top:50px;">❌ 해당 디스코드 서버에 먼저 입장한 후 인증해주세요.</h2>');
+            return res.send(getErrorHTML('서버 입장 필요', '해당 디스코드 서버에 먼저 입장한 후 다시 인증해주세요.'));
         }
 
-        // ==========================================
-        // 🚫 2. 타서버(블랙리스트) 소속 여부 및 IP 강제 킥 
-        // ==========================================
         const blacklistedServers = botData.serverBlacklists[guildId] || [];
-        // 유저가 가입된 서버 중 블랙리스트에 등록된 타서버가 있는지 찾기
         const foundBlacklistServer = userGuilds.find(guild => blacklistedServers.includes(guild.id));
 
         if (foundBlacklistServer || botData.serverIpBlacklists[guildId]?.includes(userIP)) {
             let kickReason = foundBlacklistServer ? `웹 인증: 차단된 타서버(${foundBlacklistServer.name}) 소속 유저` : '웹 인증: IP 차단 대상자';
-            
+            let blockReasonUI = foundBlacklistServer 
+                ? `차단된 적대 서버 <b>[ ${foundBlacklistServer.name} ]</b> 에 소속되어 있어<br>` 
+                : '차단된 IP로 접속하여<br>';
+
             try {
                 const guild = await client.guilds.fetch(guildId);
                 const member = await guild.members.fetch(userData.id).catch(() => null);
                 if (member) {
-                    await member.kick(kickReason); // 발견 즉시 킥!
-                    console.log(`[킥 실행] ${userData.username} 님을 추방했습니다. 이유: ${kickReason}`);
+                    await member.kick(kickReason); 
                 }
             } catch (e) {
-                console.error(`[킥 실패] ${userData.username} 님 추방 실패 (봇 권한 부족)`);
+                console.error(`[킥 실패] ${userData.username} 님 추방 실패`);
             }
 
-            return res.send(`
-                <h1 style="color:red;text-align:center;margin-top:50px;">🚫 접근 차단됨</h1>
-                <p style="text-align:center;">${foundBlacklistServer ? `차단된 적대 서버 <b>[ ${foundBlacklistServer.name} ]</b> 에 소속되어 있어<br>` : '차단된 IP로 접속하여<br>'}서버에서 즉시 추방(Kick) 되었습니다.</p>
-            `);
+            return res.send(getErrorHTML('접근 영구 차단됨', `${blockReasonUI}서버에서 즉시 추방(Kick) 되었습니다.`, '🚫'));
         }
 
-        // ⛔ 3. 부계정 다중 접속 컷
+        // ==========================================
+        // 🛑 부계정 접속 카운트 및 퍼센트 계산 로직
+        // ==========================================
         if (!botData.ipRecords[guildId]) botData.ipRecords[guildId] = {};
         if (!botData.ipRecords[guildId][userIP]) botData.ipRecords[guildId][userIP] = [];
         const ipUsers = botData.ipRecords[guildId][userIP];
 
         const limit = botData.altLimits[guildId];
         if (limit && limit > 0 && !ipUsers.includes(userData.id) && ipUsers.length >= limit) {
-            return res.send(`
-                <h1 style="color:red; text-align:center; margin-top:50px;">🚫 부계정 방어벽 작동</h1>
-                <p style="text-align:center;">동일 네트워크(IP)에서 허용된 계정 수(${limit}개)를 초과했습니다.</p>
-            `);
+            return res.send(getErrorHTML('부계정 방어벽 작동', `동일 네트워크(IP)에서 허용된 계정 수(${limit}개)를 초과했습니다.`, '🛑'));
         }
 
         if (!ipUsers.includes(userData.id)) {
@@ -288,7 +353,14 @@ app.get('/auth/discord/callback', async (req, res) => {
             saveData();
         }
 
-        // 🎖️ 4. 100% 역할 지급 로직
+        // 📊 동일 IP 접속 계정 수에 따른 부계정 의심 퍼센트 계산
+        const sameIpCount = ipUsers.length;
+        let altRiskPercent = 0;
+        if (sameIpCount === 2) altRiskPercent = 50;
+        else if (sameIpCount === 3) altRiskPercent = 80;
+        else if (sameIpCount >= 4) altRiskPercent = 100;
+
+        // 역할 지급
         const roleId = botData.verifyRoles[guildId];
         let roleSuccess = false;
         if (roleId) {
@@ -297,40 +369,49 @@ app.get('/auth/discord/callback', async (req, res) => {
                 let member = await guild.members.fetch(userData.id).catch(() => null);
                 if (member) {
                     await member.roles.add(roleId);
-                    console.log(`[성공] ${userData.username} 님에게 역할 지급 완료!`);
                     roleSuccess = true;
                 }
             } catch (roleErr) {
-                console.error(`[실패] 역할 지급 실패. 봇 권한/순위를 확인하세요.`);
+                console.error(`[실패] 역할 지급 실패`);
             }
         }
 
-        const isAlt = ipUsers.length > 1;
+        // ==========================================
+        // 📩 요청하신 지정 로그 양식 렌더링
+        // ==========================================
+        const userDisplayName = userData.global_name 
+            ? `${userData.global_name} (@${userData.username})` 
+            : `@${userData.username}`;
+
+        // 위험도에 따라 로그 임베드 색상 변경 (정상: 초록, 50%: 노랑, 80% 이상: 빨강)
+        const embedColor = altRiskPercent >= 80 ? 0xED4245 : (altRiskPercent >= 50 ? 0xFEE75C : 0x57F287);
+
         const logEmbed = new EmbedBuilder()
-            .setColor(isAlt ? 0xFF0000 : 0x00FF00)
-            .setTitle('🔐 디스코드 웹 인증 완료')
-            .setThumbnail(`https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`)
+            .setColor(embedColor)
+            .setTitle('🔐 디스코드 보안 인증 성공')
+            .setThumbnail(userData.avatar ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png')
             .addFields(
-                { name: '👤 유저 정보', value: `<@${userData.id}> (${userData.username})`, inline: true },
-                { name: '🌐 접속 IP', value: userIP, inline: true },
-                { name: '📍 위치 및 통신사', value: ipInfoText, inline: false },
-                { name: '🎖️ 역할 지급 상태', value: roleSuccess ? '✅ 지급 성공' : '❌ 지급 실패 (봇 권한 확인 요망)', inline: false }
+                { name: '디스코드 닉네임:', value: `<@${userData.id}>\n(${userDisplayName})`, inline: false },
+                { name: '부계정 의심:', value: `**${altRiskPercent}%** (동일 IP 접근 계정: ${sameIpCount}개)`, inline: false },
+                { name: 'ip:', value: `\`${userIP}\``, inline: false },
+                { name: '📍 위치 및 통신사:', value: ipInfoText, inline: false },
+                { name: '🎖️ 역할 지급:', value: roleSuccess ? '✅ 지급 완료' : '❌ 지급 실패 (권한 확인 필요)', inline: false }
             )
-            .setFooter({ text: isAlt ? `⚠️ 다중 계정 경고` : '✅ 정상적인 인증 접근' })
+            .setFooter({ text: sameIpCount > 1 ? `⚠️ 주의: 동일 IP 다중 계정 접속 감지됨` : '✅ 정상 접근 (단일 계정)' })
             .setTimestamp();
 
         await sendLog(guildId, { embeds: [logEmbed] });
 
-        res.send(`<h2 style="color:green;text-align:center;margin-top:50px;">✅ 인증 완료되었습니다. 디스코드로 돌아가주세요.</h2>`);
+        res.send(getSuccessHTML(userData, userIP));
 
     } catch (error) {
         console.error("오류 발생:", error);
-        res.send('<h2 style="color:red;text-align:center;">❌ 인증 처리 중 오류가 발생했습니다.</h2>');
+        res.send(getErrorHTML('인증 처리 오류', '디스코드 서버와 통신하는 중 문제가 발생했습니다. 관리자에게 문의하세요.'));
     }
 });
 
 // ==========================================
-// 📬 무조건 보내는 로그 시스템
+// 📬 로그 자동 전송 시스템
 // ==========================================
 async function sendLog(guildId, payload) {
     try {
@@ -338,28 +419,52 @@ async function sendLog(guildId, payload) {
         if (!guild) return;
 
         const channelId = botData.serverLogs[guildId];
+        const hasOwnerDM = botData.ownerDMs.includes(guildId);
+        
+        let logSent = false;
+
         if (channelId) {
             try {
                 const channel = await guild.channels.fetch(channelId);
-                if (channel) await channel.send(payload);
+                if (channel) {
+                    await channel.send(payload);
+                    logSent = true;
+                }
             } catch (err) {
                 console.error(`[오류] 채널 로그 전송 실패.`);
             }
         }
 
-        if (botData.ownerDMs.includes(guildId)) {
+        if (hasOwnerDM) {
             try {
                 const owner = await guild.fetchOwner();
                 if (owner) {
                     await owner.send({ 
-                        content: `🚨 **[${guild.name}]** 서버에서 새로운 인증 로그가 접수되었습니다.`, 
+                        content: `🚨 **[${guild.name}]** 새로운 인증 로그가 접수되었습니다.`, 
                         embeds: payload.embeds 
                     });
+                    logSent = true;
                 }
             } catch (err) {
                 console.error(`[오류] 서버장 DM 전송 실패.`);
             }
         }
+
+        // 설정 안했을 경우 서버장 자동 고정 전송
+        if (!logSent) {
+            try {
+                const owner = await guild.fetchOwner();
+                if (owner) {
+                    await owner.send({ 
+                        content: `⚠️ (자동 알림) **[${guild.name}]** 인증 로그 채널이 설정되지 않아 서버장님께 자동으로 발송되었습니다.\n\`/서버지정\` 명령어로 채널을 등록하실 수 있습니다.`, 
+                        embeds: payload.embeds 
+                    });
+                }
+            } catch (err) {
+                console.error(`[오류] 서버장 강제 DM 전송 실패.`);
+            }
+        }
+
     } catch (e) {
         console.error('로그 전송 오류:', e);
     }
@@ -367,4 +472,3 @@ async function sendLog(guildId, payload) {
 
 client.login(process.env.DISCORD_BOT_TOKEN);
 app.listen(PORT, () => console.log(`🌍 시스템 포트 ${PORT} 가동 완료!`));
-
