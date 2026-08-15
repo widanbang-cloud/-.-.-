@@ -1,1 +1,15 @@
-npm install express express-session axios dotenv discord.js
+{
+  "name": "discord-auth-bot",
+  "version": "1.0.0",
+  "description": "Discord Auth and Log Bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "discord.js": "^14.14.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
