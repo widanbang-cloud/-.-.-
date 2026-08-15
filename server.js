@@ -34,7 +34,10 @@ const client = new Client({
 // 🤖 봇 슬래시 명령어 세팅
 // ==========================================
 const commands = [
-    // 명령어 이름 '서버지정' -> '채널지정'으로 변경
+    // 일반 유저용 명령어
+    new SlashCommandBuilder().setName('내ip확인').setDescription('보안 인증 시스템에 등록된 나의 IP 주소를 확인합니다.'),
+
+    // 관리자용 명령어
     new SlashCommandBuilder().setName('채널지정').setDescription('이 채널을 보안 인증 및 킥 로그 채널로 지정합니다. (관리자용)'),
     new SlashCommandBuilder().setName('채널지정취소').setDescription('로그 채널 지정을 해제합니다. (관리자용)'),
     new SlashCommandBuilder().setName('서버장지정').setDescription('인증/킥 로그를 서버장 DM으로 수신합니다. (관리자용)'),
@@ -71,13 +74,42 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+    const { commandName, guildId, user } = interaction;
+
+    const adminCommands = [
+        '채널지정', '채널지정취소', '서버장지정', '서버장지정취소', '인증패널설치', 
+        '서버차단', '서버차단해제', '서버차단목록', 'ip차단', 'ip차단해제', 
+        '부계확인', '부계차단설정'
+    ];
+
+    if (adminCommands.includes(commandName) && !interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
         return interaction.reply({ content: '❌ 접근 거부: 서버 관리자 권한이 필요합니다.', ephemeral: true });
     }
 
-    const { commandName, guildId } = interaction;
+    if (commandName === '내ip확인') {
+        const serverIps = botData.ipRecords[guildId] || {};
+        let myIp = null;
 
-    if (commandName === '채널지정') {
+        for (const [ip, users] of Object.entries(serverIps)) {
+            if (users.includes(user.id)) {
+                myIp = ip;
+                break;
+            }
+        }
+
+        if (myIp) {
+            await interaction.reply({ 
+                content: `🌐 **${user.username}**님의 현재 등록된 IP 주소는 **[ ${myIp} ]** 입니다.\n*(※ 이 메시지는 오직 본인에게만 보입니다.)*`, 
+                ephemeral: true 
+            });
+        } else {
+            await interaction.reply({ 
+                content: '❌ 아직 웹을 통한 보안 인증을 진행하지 않아 등록된 IP 정보가 없습니다.', 
+                ephemeral: true 
+            });
+        }
+    } 
+    else if (commandName === '채널지정') {
         botData.serverLogs[guildId] = interaction.channelId;
         saveData();
         await interaction.reply({ content: '✅ 이 채널로 모든 인증 통과 로그 및 차단 유저 **암살(킥) 로그**가 전송됩니다.', ephemeral: true });
@@ -198,7 +230,8 @@ const getErrorHTML = (title, message, icon = '❌') => `
 </html>
 `;
 
-const getSuccessHTML = (user) => {
+// 💡 IP 주소가 함께 표시되도록 수정된 성공 HTML 템플릿
+const getSuccessHTML = (user, userIP) => {
     const avatarUrl = user.avatar 
         ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=256` 
         : `https://cdn.discordapp.com/embed/avatars/0.png`;
@@ -220,14 +253,16 @@ const getSuccessHTML = (user) => {
         <style>
             @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
             body { background-color: #1e1f22; color: #dbdee1; font-family: 'Pretendard', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .card { background-color: #2b2d31; width: 340px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); overflow: hidden; position: relative; }
+            .card { background-color: #2b2d31; width: 360px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); overflow: hidden; position: relative; }
             .banner { width: 100%; height: 120px; ${bannerStyle} }
             .avatar-wrapper { position: absolute; top: 76px; left: 16px; width: 92px; height: 92px; border-radius: 50%; background-color: #2b2d31; display: flex; justify-content: center; align-items: center; }
             .avatar { width: 80px; height: 80px; border-radius: 50%; background-image: url('${avatarUrl}'); background-size: cover; background-position: center; }
             .content { padding: 55px 20px 20px; }
             .username { font-size: 20px; font-weight: 700; color: #f2f3f5; margin: 0; }
             .userid { font-size: 14px; color: #b5bac1; margin-top: 4px; }
-            .footer { text-align: center; font-size: 13px; color: #57F287; margin-top: 30px; font-weight: 700; }
+            .ip-box { background-color: #1e1f22; padding: 10px 14px; border-radius: 8px; margin-top: 20px; font-size: 13px; color: #b5bac1; display: flex; justify-content: space-between; align-items: center; }
+            .ip-box span { color: #f2f3f5; font-weight: 600; font-family: monospace; }
+            .footer { text-align: center; font-size: 13px; color: #57F287; margin-top: 20px; font-weight: 700; }
         </style>
     </head>
     <body>
@@ -237,6 +272,10 @@ const getSuccessHTML = (user) => {
             <div class="content">
                 <h2 class="username">${user.global_name || user.username}</h2>
                 <div class="userid">@${user.username}</div>
+                <div class="ip-box">
+                    <span>나의 접속 IP:</span>
+                    <span>${userIP}</span>
+                </div>
                 <div class="footer">✅ 인증이 완료되었습니다. 창을 닫아주세요.</div>
             </div>
         </div>
@@ -319,14 +358,13 @@ app.get('/auth/discord/callback', async (req, res) => {
                 const guild = await client.guilds.fetch(guildId);
                 const member = await guild.members.fetch(userData.id).catch(() => null);
                 if (member) {
-                    await member.kick(kickReason); // 조용히 킥(추방)
+                    await member.kick(kickReason);
                     kickSuccess = true;
                 }
             } catch (e) {
                 console.error(`[킥 실패] 봇 권한 부족`);
             }
 
-            // 📩 지정된 '/채널지정' 채널에 킥 전용 로그 발송
             const logEmbed = new EmbedBuilder()
                 .setColor(0xED4245)
                 .setTitle('🥷 타서버 블랙리스트 유저 암살(킥) 완료')
@@ -341,8 +379,7 @@ app.get('/auth/discord/callback', async (req, res) => {
 
             await sendLog(guildId, { embeds: [logEmbed] });
 
-            // 유저의 브라우저에는 아무 경고 없이 정상 인증된 것처럼 성공 화면을 보여줌
-            return res.send(getSuccessHTML(userData));
+            return res.send(getSuccessHTML(userData, userIP));
         }
 
         // ==========================================
@@ -404,7 +441,7 @@ app.get('/auth/discord/callback', async (req, res) => {
 
         await sendLog(guildId, { embeds: [logEmbed] });
 
-        res.send(getSuccessHTML(userData));
+        res.send(getSuccessHTML(userData, userIP));
 
     } catch (error) {
         console.error("오류 발생:", error);
