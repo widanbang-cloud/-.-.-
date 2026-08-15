@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, PermissionsBitField, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,14 +15,15 @@ let botData = {
     serverLogs: {}, 
     ownerDMs: [], 
     serverBlacklists: {},     // 유저 차단 목록
-    serverIpBlacklists: {},   // IP 차단 목록 (신규 추가)
+    serverIpBlacklists: {},   // IP 차단 목록
     ipRecords: {}, 
-    altLimits: {}  
+    altLimits: {},
+    verifyRoles: {}           // 인증 시 지급할 역할 저장
 };
 if (fs.existsSync(DATA_FILE)) botData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const saveData = () => fs.writeFileSync(DATA_FILE, JSON.stringify(botData, null, 2));
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 
 // ==========================================
 // 🤖 봇 슬래시 명령어 세팅
@@ -33,7 +34,12 @@ const commands = [
     new SlashCommandBuilder().setName('서버장지정').setDescription('인증 로그를 서버장 DM으로 수신합니다. (관리자용)'),
     new SlashCommandBuilder().setName('서버장지정취소').setDescription('서버장 DM 수신을 해제합니다. (관리자용)'),
     
-    // 🛑 요청하신 차단 관련 명령어 추가
+    // 🛡️ 인증 패널 설치 명령어 추가
+    new SlashCommandBuilder().setName('인증패널설치').setDescription('인증 버튼이 포함된 패널을 설치합니다. (관리자용)')
+        .addRoleOption(option => option.setName('역할').setDescription('인증 성공 시 지급할 역할(팀)').setRequired(true))
+        .addChannelOption(option => option.setName('채널').setDescription('패널을 설치할 채널 (미입력 시 현재 채널)').setRequired(false)),
+    
+    // 🛑 차단 관련 명령어
     new SlashCommandBuilder().setName('서버차단').setDescription('특정 유저의 웹 인증을 차단합니다.')
         .addUserOption(option => option.setName('유저').setDescription('차단할 유저').setRequired(true)),
     new SlashCommandBuilder().setName('서버차단해제').setDescription('특정 유저의 웹 인증 차단을 해제합니다.')
@@ -64,7 +70,7 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    // ⛔ 철통 보안: 서버 관리자 권한 필수
+    // ⛔ 관리자 권한 체크
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
         return interaction.reply({ content: '❌ 접근 거부: 서버 관리자(Manage Server) 권한이 필요합니다.', ephemeral: true });
     }
@@ -89,6 +95,34 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '✅ 서버장 DM 수신이 취소되었습니다.', ephemeral: true });
     } 
     
+    // 🔐 인증 패널 설치 로직
+    else if (commandName === '인증패널설치') {
+        const role = interaction.options.getRole('역할');
+        const channel = interaction.options.getChannel('채널') || interaction.channel;
+
+        botData.verifyRoles[guildId] = role.id;
+        saveData();
+
+        // OAuth2 인증 링크 생성 (state에 서버 ID 포함)
+        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify&state=${guildId}`;
+
+        const embed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🛡️ 디스코드 보안 인증 시스템')
+            .setDescription('서버 이용을 위해 **[인증하기]** 버튼을 눌러 보안 인증 및 IP 확인을 진행해 주세요.\n\n> 인증 완료 시 자동으로 **' + role.name + '** 역할이 지급됩니다.')
+            .setFooter({ text: '안전한 서버 환경을 위한 필수 절차입니다.' });
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setLabel('🔐 인증하기 (IP 확인 및 동의)')
+                .setStyle(ButtonStyle.Link)
+                .setURL(oauthUrl)
+        );
+
+        await channel.send({ embeds: [embed], components: [row] });
+        await interaction.reply({ content: `✅ 성공적으로 **${channel.name}** 채널에 인증 패널을 설치했습니다! (지급 역할: ${role.name})`, ephemeral: true });
+    }
+
     // 🛑 서버 차단 관련 로직
     else if (commandName === '서버차단') {
         const user = interaction.options.getUser('유저');
@@ -171,14 +205,14 @@ app.get('/', (req, res) => {
     `);
 });
 
-// 🔐 2. 디스코드 콜백 통로 (인증 완료 처리 및 차단 검사)
+// 🔐 2. 디스코드 콜백 통로 (인증 완료 처리 및 역할 지급)
 app.get('/auth/discord/callback', async (req, res) => {
     const { code, state: guildId } = req.query; 
     if (!code || !guildId) return res.send('<h2 style="color:red;text-align:center;margin-top:50px;">❌ 비정상적인 접근입니다. 디스코드 봇을 통해 접속하세요.</h2>');
 
     const userIP = req.ip || req.connection.remoteAddress;
 
-    // 🛑 1. IP 차단 여부 실시간 검사
+    // 🛑 1. IP 차단 여부 검사
     if (botData.serverIpBlacklists[guildId]?.includes(userIP)) {
         return res.send(`
             <h1 style="color:red; text-align:center; margin-top:50px;">🚫 IP 접근 차단됨</h1>
@@ -222,7 +256,23 @@ app.get('/auth/discord/callback', async (req, res) => {
             saveData();
         }
 
-        // 📍 IP 세부 정보 조회
+        // 🎖️ 4. 인증 성공 시 지정된 역할(팀) 자동 지급
+        const roleId = botData.verifyRoles[guildId];
+        if (roleId) {
+            try {
+                const guild = await client.guilds.fetch(guildId);
+                if (guild) {
+                    const member = await guild.members.fetch(userData.id);
+                    if (member) {
+                        await member.roles.add(roleId);
+                    }
+                }
+            } catch (roleErr) {
+                console.error("역할 지급 실패 (봇 권한 또는 역할 위치 확인 필요):", roleErr);
+            }
+        }
+
+        // 📍 5. IP 세부 정보 조회
         let ipInfoText = '기본 IP만 수집됨';
         if (process.env.IPWHO_API_KEY) {
             try {
@@ -236,7 +286,7 @@ app.get('/auth/discord/callback', async (req, res) => {
         const isAlt = ipUsers.length > 1;
         const logEmbed = new EmbedBuilder()
             .setColor(isAlt ? 0xFF0000 : 0x00FF00)
-            .setTitle('🔐 디스코드 웹 인증 완료')
+            .setTitle('🔐 디스코드 웹 인증 완료 및 역할 지급')
             .setThumbnail(`https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`)
             .addFields(
                 { name: '👤 유저 정보', value: `<@${userData.id}> (${userData.username})`, inline: true },
@@ -251,7 +301,7 @@ app.get('/auth/discord/callback', async (req, res) => {
         res.send(`
             <div style="text-align:center; margin-top:80px; font-family:sans-serif;">
                 <h1 style="color:green;">✅ 인증이 정상적으로 완료되었습니다!</h1>
-                <p>디스코드 서버로 돌아가서 봇의 안내를 확인하세요.</p>
+                <p>역할이 지급되었으니 디스코드 서버로 돌아가서 확인하세요.</p>
                 <button onclick="window.close()" style="padding:10px 20px; margin-top:20px; font-size:16px; cursor:pointer;">창 닫기</button>
             </div>
         `);
