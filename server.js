@@ -9,12 +9,16 @@ const PORT = process.env.PORT || 3000;
 const DATA_FILE = './data.json';
 
 // ==========================================
-// 🗂️ 데이터베이스 세팅 (서버별 채널 및 블랙리스트)
+// 🗂️ 데이터베이스 세팅
 // ==========================================
-let botData = { serverLogs: {}, ownerDMs: [], serverBlacklists: {} };
-if (fs.existsSync(DATA_FILE)) {
-    botData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-}
+let botData = { 
+    serverLogs: {}, 
+    ownerDMs: [], 
+    serverBlacklists: {},
+    ipRecords: {}, // 서버별 IP 기록 { guildId: { "192.168...": ["유저ID1", "유저ID2"] } }
+    altLimits: {}  // 서버별 부계정 허용 한도 { guildId: 허용개수 }
+};
+if (fs.existsSync(DATA_FILE)) botData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const saveData = () => fs.writeFileSync(DATA_FILE, JSON.stringify(botData, null, 2));
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -31,187 +35,185 @@ const commands = [
         .addUserOption(option => option.setName('유저').setDescription('차단할 유저').setRequired(true)),
     new SlashCommandBuilder().setName('블랙리스트목록').setDescription('차단된 유저 목록 확인'),
     new SlashCommandBuilder().setName('블랙리스트삭제').setDescription('유저 차단 해제')
-        .addUserOption(option => option.setName('유저').setDescription('차단 해제할 유저').setRequired(true))
+        .addUserOption(option => option.setName('유저').setDescription('차단 해제할 유저').setRequired(true)),
+    new SlashCommandBuilder().setName('부계확인').setDescription('동일한 IP로 인증한 부계정 의심 목록을 확인합니다.'),
+    new SlashCommandBuilder().setName('부계차단설정').setDescription('동일 IP 허용 최대 계정 수를 설정합니다.')
+        .addIntegerOption(option => option.setName('개수').setDescription('허용할 개수 (0 입력 시 무제한)').setRequired(true))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
 
 client.once('ready', async () => {
     console.log(`🤖 봇 로그인 완료: ${client.user.tag}`);
-    try {
-        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('✅ 슬래시 명령어 등록 완료!');
-    } catch (error) {
-        console.error('명령어 등록 에러:', error);
-    }
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log('✅ 슬래시 명령어 등록 완료!');
 });
 
 // 명령어 처리 로직
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
-
-    // ⛔ 권한 체크: 서버 관리자 권한이 없으면 거부
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
         return interaction.reply({ content: '❌ 서버 관리자(Manage Server) 권한이 필요합니다.', ephemeral: true });
     }
 
     const { commandName, guildId } = interaction;
 
+    // (기존 명령어들은 생략 없이 동일하게 작동)
     if (commandName === '서버지정') {
         botData.serverLogs[guildId] = interaction.channelId;
         saveData();
-        await interaction.reply({ content: '✅ 이 채널이 인증 로그 채널로 지정되었습니다.', ephemeral: true });
+        await interaction.reply({ content: '✅ 인증 로그 채널로 지정되었습니다.', ephemeral: true });
     } else if (commandName === '서버지정취소') {
         delete botData.serverLogs[guildId];
         saveData();
-        await interaction.reply({ content: '✅ 인증 로그 채널 지정이 취소되었습니다.', ephemeral: true });
+        await interaction.reply({ content: '✅ 인증 로그 채널이 취소되었습니다.', ephemeral: true });
     } else if (commandName === '서버장지정') {
         if (!botData.ownerDMs.includes(guildId)) botData.ownerDMs.push(guildId);
         saveData();
-        await interaction.reply({ content: '✅ 앞으로 인증 로그를 서버장 DM으로 전송합니다.', ephemeral: true });
+        await interaction.reply({ content: '✅ 인증 로그를 서버장 DM으로 전송합니다.', ephemeral: true });
     } else if (commandName === '서버장지정취소') {
         botData.ownerDMs = botData.ownerDMs.filter(id => id !== guildId);
         saveData();
-        await interaction.reply({ content: '✅ 서버장 DM 로그 전송이 취소되었습니다.', ephemeral: true });
+        await interaction.reply({ content: '✅ 서버장 DM 전송이 취소되었습니다.', ephemeral: true });
     } else if (commandName === '블랙리스트추가') {
         const user = interaction.options.getUser('유저');
         if (!botData.serverBlacklists[guildId]) botData.serverBlacklists[guildId] = [];
-        if (!botData.serverBlacklists[guildId].includes(user.id)) {
-            botData.serverBlacklists[guildId].push(user.id);
-            saveData();
-        }
-        await interaction.reply({ content: `✅ **${user.tag}** 님이 해당 서버 인증에서 차단되었습니다.`, ephemeral: true });
+        if (!botData.serverBlacklists[guildId].includes(user.id)) botData.serverBlacklists[guildId].push(user.id);
+        saveData();
+        await interaction.reply({ content: `✅ **${user.tag}** 님이 차단되었습니다.`, ephemeral: true });
     } else if (commandName === '블랙리스트목록') {
         const list = botData.serverBlacklists[guildId] || [];
-        await interaction.reply({ content: `📜 **차단된 유저 목록 (ID):**\n${list.length > 0 ? list.join('\n') : '없음'}`, ephemeral: true });
+        await interaction.reply({ content: `📜 **차단 목록:**\n${list.length > 0 ? list.join('\n') : '없음'}`, ephemeral: true });
     } else if (commandName === '블랙리스트삭제') {
         const user = interaction.options.getUser('유저');
-        if (botData.serverBlacklists[guildId]) {
-            botData.serverBlacklists[guildId] = botData.serverBlacklists[guildId].filter(id => id !== user.id);
-            saveData();
-        }
+        if (botData.serverBlacklists[guildId]) botData.serverBlacklists[guildId] = botData.serverBlacklists[guildId].filter(id => id !== user.id);
+        saveData();
         await interaction.reply({ content: `✅ **${user.tag}** 님의 차단이 해제되었습니다.`, ephemeral: true });
+    } 
+    // 👥 부계정 관련 기능 추가
+    else if (commandName === '부계확인') {
+        const serverIps = botData.ipRecords[guildId] || {};
+        let result = [];
+        for (const [ip, users] of Object.entries(serverIps)) {
+            if (users.length > 1) {
+                result.push(`**IP [ ${ip} ]**\n └ 계정 목록: ${users.map(id => `<@${id}>`).join(', ')}`);
+            }
+        }
+        if (result.length === 0) return interaction.reply({ content: '✅ 동일한 IP로 여러 번 인증된 부계정 의심 기록이 없습니다.', ephemeral: true });
+        
+        // 디스코드 메시지는 2000자 제한이 있으므로 너무 길면 잘라줌
+        let replyMsg = `🚨 **부계정 의심 목록** 🚨\n\n${result.join('\n\n')}`;
+        if (replyMsg.length > 2000) replyMsg = replyMsg.slice(0, 1995) + '...';
+        await interaction.reply({ content: replyMsg, ephemeral: true });
+    } 
+    else if (commandName === '부계차단설정') {
+        const limit = interaction.options.getInteger('개수');
+        if (limit === 0) {
+            delete botData.altLimits[guildId];
+            saveData();
+            await interaction.reply({ content: '✅ 동일 IP 다중 인증 제한을 **해제(무제한)** 했습니다.', ephemeral: true });
+        } else {
+            botData.altLimits[guildId] = limit;
+            saveData();
+            await interaction.reply({ content: `✅ 앞으로 동일한 IP에서는 **최대 ${limit}개**의 계정만 인증할 수 있습니다.`, ephemeral: true });
+        }
     }
 });
 
 // ==========================================
-// 🌍 웹 서버 세팅 (IP 수집, 동의서, OAuth2 연동)
+// 🌍 웹 서버 세팅 (IP 수집, 부계정 체크, OAuth2 연동)
 // ==========================================
-
-// 신뢰할 수 있는 프록시 설정 (Render 환경에서 올바른 IP를 가져오기 위해 필수)
 app.set('trust proxy', true);
 
-// 1. 디스코드 인증 완료 후 돌아오는 콜백 주소
 app.get('/auth/discord/callback', async (req, res) => {
-    const { code, state } = req.query; // state에는 서버 ID(guildId)가 들어있어야 합니다.
-    const guildId = state;
-
-    if (!code) return res.send('❌ 인증 코드가 없습니다.');
-    if (!guildId) return res.send('❌ 서버 정보가 누락되었습니다. 봇이 제공한 링크로 다시 접속해 주세요.');
+    const { code, state: guildId } = req.query; 
+    if (!code || !guildId) return res.send('❌ 잘못된 접근입니다.');
 
     try {
-        // 🔑 1단계: 코드를 사용해 디스코드 엑세스 토큰 받아오기
-        const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
+        const tokenRes = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
             client_id: process.env.DISCORD_CLIENT_ID,
             client_secret: process.env.DISCORD_CLIENT_SECRET,
-            grant_type: 'authorization_code',
-            code: code,
+            grant_type: 'authorization_code', code,
             redirect_uri: process.env.DISCORD_REDIRECT_URI
-        }).toString(), {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+
+        const userRes = await axios.get('https://discord.com/api/users/@me', {
+            headers: { Authorization: `Bearer ${tokenRes.data.access_token}` }
         });
+        const userData = userRes.data;
 
-        const accessToken = tokenResponse.data.access_token;
+        // ⛔ 블랙리스트 확인
+        if (botData.serverBlacklists[guildId]?.includes(userData.id)) {
+            return res.send('<h1 style="color:red;text-align:center;">🚫 접근 차단됨 (관리자 차단)</h1>');
+        }
 
-        // 👤 2단계: 토큰으로 유저 정보 받아오기
-        const userResponse = await axios.get('https://discord.com/api/users/@me', {
-            headers: { Authorization: `Bearer ${accessToken}` }
-        });
-        
-        const userData = userResponse.data;
+        const userIP = req.ip || req.connection.remoteAddress;
 
-        // ⛔ 3단계: 블랙리스트 확인
-        if (botData.serverBlacklists[guildId] && botData.serverBlacklists[guildId].includes(userData.id)) {
+        // 👥 1. IP 기록 저장
+        if (!botData.ipRecords[guildId]) botData.ipRecords[guildId] = {};
+        if (!botData.ipRecords[guildId][userIP]) botData.ipRecords[guildId][userIP] = [];
+        const ipUsers = botData.ipRecords[guildId][userIP];
+
+        // 👥 2. 부계정 제한 체크
+        const limit = botData.altLimits[guildId];
+        // 제한이 설정되어 있고(>0), 현재 유저가 새 유저이며, 이미 제한 개수를 채웠다면 차단
+        if (limit && limit > 0 && !ipUsers.includes(userData.id) && ipUsers.length >= limit) {
             return res.send(`
-                <h1 style="color:red; text-align:center; margin-top:50px;">🚫 접근 차단됨</h1>
-                <p style="text-align:center;">해당 서버 관리자에 의해 인증 시스템 이용이 차단되었습니다.</p>
+                <h1 style="color:red; text-align:center; margin-top:50px;">🚫 부계정 생성 제한</h1>
+                <p style="text-align:center;">이 IP에서는 최대 ${limit}개의 계정만 인증할 수 있습니다.</p>
             `);
         }
 
-        // 🌐 4단계: 접속자 IP 추출 및 IPWHO API 조회
-        const userIP = req.ip || req.connection.remoteAddress;
-        let ipInfoText = 'IP 정보 조회 실패';
-
-        if (process.env.IPWHO_API_KEY) {
-            try {
-                // IPWHO API 키를 쿼리에 담아서 전송
-                const ipwhoRes = await axios.get(`https://ipwho.is/${userIP}?key=${process.env.IPWHO_API_KEY}`);
-                if (ipwhoRes.data.success) {
-                    ipInfoText = `국가: ${ipwhoRes.data.country}\n도시: ${ipwhoRes.data.city}\n통신사: ${ipwhoRes.data.connection.isp}`;
-                }
-            } catch (err) {
-                console.error('IP 정보 조회 에러:', err.message);
-            }
+        // 통과 시, IP 기록에 유저 ID 추가
+        if (!ipUsers.includes(userData.id)) {
+            ipUsers.push(userData.id);
+            saveData();
         }
 
-        // 📝 5단계: 관리자에게 보낼 멋진 Embed 로그 생성
+        let ipInfoText = 'IP 정보 조회 실패';
+        if (process.env.IPWHO_API_KEY) {
+            try {
+                const ipwho = await axios.get(`https://ipwho.is/${userIP}?key=${process.env.IPWHO_API_KEY}`);
+                if (ipwho.data.success) ipInfoText = `${ipwho.data.country}, ${ipwho.data.city} (${ipwho.data.connection.isp})`;
+            } catch (e) {}
+        }
+
+        // 📝 3. 인증 로그에 부계정 의심 여부 표시 추가
+        const isAlt = ipUsers.length > 1;
         const logEmbed = new EmbedBuilder()
-            .setColor(0x00FF00)
+            .setColor(isAlt ? 0xFFA500 : 0x00FF00) // 부계정이면 주황색, 아니면 초록색
             .setTitle('✅ 새로운 유저 인증 완료')
             .setThumbnail(`https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`)
             .addFields(
-                { name: '사용자 이름', value: `${userData.username}#${userData.discriminator} (<@${userData.id}>)`, inline: true },
-                { name: '사용자 ID', value: userData.id, inline: true },
-                { name: '접속 IP', value: userIP, inline: false },
-                { name: 'IP 세부 정보', value: ipInfoText, inline: false }
-            )
-            .setTimestamp();
+                { name: '사용자', value: `<@${userData.id}> (${userData.username})`, inline: true },
+                { name: '접속 IP', value: userIP, inline: true },
+                { name: 'IP 세부 정보', value: ipInfoText, inline: false },
+                { name: '⚠️ 다중 계정(부계) 의심', value: isAlt ? `**주의!** 이 IP로 총 **${ipUsers.length}개**의 계정이 인증됨` : '없음 (정상)', inline: false }
+            ).setTimestamp();
 
-        // 📡 6단계: 설정된 채널 및 서버장에게 로그 전송
         await sendLog(guildId, { embeds: [logEmbed] });
 
-        // 7단계: 유저에게 보여줄 성공 화면 (동의서 확인 완료 문구 포함)
-        res.send(`
-            <div style="text-align:center; margin-top:50px; font-family:sans-serif;">
-                <h1 style="color:green;">✅ 인증 성공!</h1>
-                <p>디스코드 정보 제공 및 IP 수집 처리가 완료되었습니다.</p>
-                <p>창을 닫고 디스코드 서버로 돌아가셔도 좋습니다.</p>
-            </div>
-        `);
-
+        res.send('<h1 style="color:green;text-align:center;margin-top:50px;">✅ 인증 성공! 디스코드로 돌아가세요.</h1>');
     } catch (error) {
-        console.error('인증 과정 중 에러 발생:', error.response ? error.response.data : error.message);
-        res.send('❌ 인증 중 오류가 발생했습니다. 나중에 다시 시도해 주세요.');
+        res.send('❌ 인증 중 오류가 발생했습니다.');
     }
 });
 
-// 📡 로그 전송 함수 (지정된 채널 + 서버장 DM)
-async function sendLog(guildId, messagePayload) {
+async function sendLog(guildId, payload) {
     try {
         const guild = await client.guilds.fetch(guildId);
         if (!guild) return;
-
-        // 1. 지정된 로그 채널이 있다면 전송
-        const logChannelId = botData.serverLogs[guildId];
-        if (logChannelId) {
-            const channel = guild.channels.cache.get(logChannelId);
-            if (channel) await channel.send(messagePayload);
+        const channelId = botData.serverLogs[guildId];
+        if (channelId) {
+            const channel = guild.channels.cache.get(channelId);
+            if (channel) await channel.send(payload);
         }
-
-        // 2. 서버장 DM 수신이 켜져있다면 전송
         if (botData.ownerDMs.includes(guildId)) {
             const owner = await guild.fetchOwner();
-            if (owner) {
-                await owner.send({ content: `**[${guild.name}]** 서버 인증 알림`, embeds: messagePayload.embeds });
-            }
+            if (owner) await owner.send({ content: `**[${guild.name}]** 인증 알림`, embeds: payload.embeds });
         }
-    } catch (error) {
-        console.error('로그 전송 실패:', error);
-    }
+    } catch (e) {}
 }
 
-// ==========================================
-// 서버 실행
-// ==========================================
 client.login(process.env.DISCORD_BOT_TOKEN);
-app.listen(PORT, () => console.log(`🌍 웹 서버 및 봇 포트 ${PORT}에서 가동 중!`));
+app.listen(PORT, () => console.log(`🌍 포트 ${PORT} 가동 중!`));
