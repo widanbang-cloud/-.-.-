@@ -23,7 +23,13 @@ let botData = {
 if (fs.existsSync(DATA_FILE)) botData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const saveData = () => fs.writeFileSync(DATA_FILE, JSON.stringify(botData, null, 2));
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+// 💡 봇 인텐트에 GuildMembers가 반드시 포함되어 있어야 역할 지급이 원활합니다.
+const client = new Client({ 
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMembers 
+    ] 
+});
 
 // ==========================================
 // 🤖 봇 슬래시 명령어 세팅
@@ -95,7 +101,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '✅ 서버장 DM 수신이 취소되었습니다.', ephemeral: true });
     } 
     
-    // 🔐 인증 패널 설치 로직 (guilds 스코프 포함)
+    // 🔐 인증 패널 설치 로직
     else if (commandName === '인증패널설치') {
         const role = interaction.options.getRole('역할');
         const channel = interaction.options.getChannel('채널') || interaction.channel;
@@ -103,7 +109,7 @@ client.on('interactionCreate', async interaction => {
         botData.verifyRoles[guildId] = role.id;
         saveData();
 
-        // OAuth2 인증 링크 생성 (scope에 identify와 guilds 모두 포함)
+        // OAuth2 인증 링크 생성 (scope에 identify와 guilds 포함)
         const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify+guilds&state=${guildId}`;
 
         const embed = new EmbedBuilder()
@@ -192,27 +198,100 @@ client.on('interactionCreate', async interaction => {
 // ==========================================
 app.set('trust proxy', true);
 
+// 🛠️ 프록시 및 로컬 환경에서 정확한 클라이언트 IP를 가져오는 헬퍼 함수
+function getClientIp(req) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) {
+        return forwarded.split(',')[0].trim();
+    }
+    return req.ip || req.connection.remoteAddress || '127.0.0.1';
+}
+
 // 🌐 1. 기본 접속 페이지 (내 IP 확인용)
 app.get('/', (req, res) => {
-    const visitorIP = req.ip || req.connection.remoteAddress;
+    const visitorIP = getClientIp(req);
     res.send(`
-        <div style="text-align:center; margin-top:80px; font-family:sans-serif;">
-            <h1 style="color:#5865F2;">🛡️ 인증 시스템 가동 중</h1>
-            <p>비정상적인 접근은 모두 서버에 기록됩니다.</p>
-            <hr style="width:350px; margin:20px auto;">
-            <p style="color:gray; font-size:16px;">당신의 현재 접속 IP: <strong>${visitorIP}</strong></p>
-        </div>
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>보안 인증 시스템</title>
+            <style>
+                body { background-color: #121214; color: #e1e1e6; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .card { background: #202024; padding: 40px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); text-align: center; width: 400px; border: 1px solid #323238; }
+                h1 { color: #5865F2; margin-bottom: 10px; font-size: 22px; }
+                p { color: #8d8d99; font-size: 14px; }
+                .ip-box { background: #121214; padding: 12px; border-radius: 8px; margin-top: 20px; font-size: 16px; color: #00b37e; border: 1px solid #29292e; font-weight: bold; }
+                hr { border: 0; border-top: 1px solid #323238; margin: 25px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h1>🛡️ 보안 인증 시스템 가동 중</h1>
+                <p>비정상적인 접근은 모두 서버에 기록됩니다.</p>
+                <hr>
+                <p>당신의 현재 접속 IP</p>
+                <div class="ip-box">${visitorIP}</div>
+            </div>
+        </body>
+        </html>
     `);
 });
 
-// 🔐 2. 디스코드 콜백 통로 (인증 완료, IP 확인, 역할 지급, 프로필 및 IP 웹 출력)
+// 🔐 2. 디스코드 콜백 통로 (인증 완료, IP 확인, 역할 지급, VPN 체크)
 app.get('/auth/discord/callback', async (req, res) => {
     const { code, state: guildId } = req.query; 
     if (!code || !guildId) return res.send('<h2 style="color:red;text-align:center;margin-top:50px;">❌ 비정상적인 접근입니다. 디스코드 봇을 통해 접속하세요.</h2>');
 
-    const userIP = req.ip || req.connection.remoteAddress;
+    const userIP = getClientIp(req);
 
-    // 🛑 1. IP 차단 여부 검사
+    // 📍 1. IP 세부 정보 및 VPN 조회 (ipwho.is 활용)
+    let ipInfoText = '기본 IP만 수집됨';
+    let isVpnOrProxy = false;
+
+    if (process.env.IPWHO_API_KEY) {
+        try {
+            const ipwho = await axios.get(`https://ipwho.is/${userIP}?key=${process.env.IPWHO_API_KEY}`);
+            if (ipwho.data.success) {
+                ipInfoText = `🌍 **${ipwho.data.country}** (${ipwho.data.city}) / ISP: ${ipwho.data.connection.isp}`;
+                
+                // ipwho.is 보안 데이터(VPN, 프록시, 토르 등 판별) 검사
+                const security = ipwho.data.security;
+                if (security && (security.vpn || security.proxy || security.tor || security.hosting)) {
+                    isVpnOrProxy = true;
+                }
+            }
+        } catch (e) {
+            console.error("IPWHO API 에러:", e.message);
+        }
+    }
+
+    // 🛑 2. VPN / 프록시 접속 차단
+    if (isVpnOrProxy) {
+        return res.send(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>VPN/프록시 차단</title>
+                <style>
+                    body { background-color: #121214; color: #e1e1e6; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                    .card { background: #202024; padding: 40px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); text-align: center; width: 420px; border: 1px solid #323238; }
+                    h1 { color: #f75a68; font-size: 20px; }
+                    p { color: #c4c4cc; font-size: 14px; line-height: 1.5; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h1>🚫 VPN 및 프록시 우회 감지</h1>
+                    <p>현재 VPN, 프록시, 혹은 호스팅 네트워크(IP: <strong>${userIP}</strong>)를 사용 중이므로 보안 정책에 따라 인증이 거부되었습니다. VPN을 끄고 다시 시도해 주세요.</p>
+                </div>
+            </body>
+            </html>
+        `);
+    }
+
+    // 🛑 3. 수동 IP 차단 여부 검사
     if (botData.serverIpBlacklists[guildId]?.includes(userIP)) {
         return res.send(`
             <h1 style="color:red; text-align:center; margin-top:50px;">🚫 IP 접근 차단됨</h1>
@@ -233,7 +312,7 @@ app.get('/auth/discord/callback', async (req, res) => {
         });
         const userData = userRes.data;
 
-        // ⛔ 2. 유저(ID) 서버 차단 여부 검사
+        // ⛔ 4. 유저(ID) 서버 차단 여부 검사
         if (botData.serverBlacklists[guildId]?.includes(userData.id)) {
             return res.send('<h1 style="color:red;text-align:center;margin-top:50px;">🚫 서버 관리자에 의해 인증이 차단된 계정입니다.</h1>');
         }
@@ -242,7 +321,7 @@ app.get('/auth/discord/callback', async (req, res) => {
         if (!botData.ipRecords[guildId][userIP]) botData.ipRecords[guildId][userIP] = [];
         const ipUsers = botData.ipRecords[guildId][userIP];
 
-        // ⛔ 3. 부계정 다중 접속 컷
+        // ⛔ 5. 부계정 다중 접속 컷
         const limit = botData.altLimits[guildId];
         if (limit && limit > 0 && !ipUsers.includes(userData.id) && ipUsers.length >= limit) {
             return res.send(`
@@ -256,31 +335,24 @@ app.get('/auth/discord/callback', async (req, res) => {
             saveData();
         }
 
-        // 🎖️ 4. 인증 성공 시 지정된 역할(팀) 자동 지급
+        // 🎖️ 6. 인증 성공 시 지정된 역할(팀) 자동 지급 (오류 방지 및 안정화 보완)
         const roleId = botData.verifyRoles[guildId];
         if (roleId) {
             try {
                 const guild = await client.guilds.fetch(guildId);
                 if (guild) {
-                    const member = await guild.members.fetch(userData.id);
+                    // 캐시에 없거나 최신 상태를 유지하기 위해 fetch 사용
+                    const member = await guild.members.fetch(userData.id).catch(() => null);
                     if (member) {
                         await member.roles.add(roleId);
+                        console.log(`[역할 지급 성공] ${guild.name} 서버의 ${member.user.tag} 님에게 역할 지급 완료`);
+                    } else {
+                        console.log(`[역할 지급 실패] 유저가 서버에 존재하지 않거나 봇이 찾지 못했습니다.`);
                     }
                 }
             } catch (roleErr) {
-                console.error("역할 지급 실패 (봇 권한 또는 역할 위치 확인 필요):", roleErr);
+                console.error("역할 지급 실패 (봇의 역할 위치가 지급하려는 역할보다 낮거나 권한이 부족합니다):", roleErr);
             }
-        }
-
-        // 📍 5. IP 세부 정보 조회
-        let ipInfoText = '기본 IP만 수집됨';
-        if (process.env.IPWHO_API_KEY) {
-            try {
-                const ipwho = await axios.get(`https://ipwho.is/${userIP}?key=${process.env.IPWHO_API_KEY}`);
-                if (ipwho.data.success) {
-                    ipInfoText = `🌍 **${ipwho.data.country}** (${ipwho.data.city}) / ISP: ${ipwho.data.connection.isp}`;
-                }
-            } catch (e) {}
         }
 
         const isAlt = ipUsers.length > 1;
@@ -307,23 +379,50 @@ app.get('/auth/discord/callback', async (req, res) => {
             ? `https://cdn.discordapp.com/banners/${userData.id}/${userData.banner}.png?size=600` 
             : null;
 
-        // 웹 페이지에 아바타, 배너, 닉네임, IP가 직접 보이도록 UI 응답
+        // 🌟 7. 세련되고 예쁜 다크모드 디자인의 웹 응답 페이지
         res.send(`
-            <div style="text-align:center; margin-top:50px; font-family:sans-serif; background:#1e1e1e; color:white; padding:30px; border-radius:10px; width:450px; margin-left:auto; margin-right:auto; box-shadow:0 4px 10px rgba(0,0,0,0.5);">
-                ${bannerUrl ? `<img src="${bannerUrl}" style="width:100%; height:120px; object-fit:cover; border-radius:8px 8px 0 0; margin-bottom:-40px;">` : ''}
-                <img src="${avatarUrl}" style="width:80px; height:80px; border-radius:50%; border:3px solid #5865F2; position:relative; background:#2f3136;">
-                <h2 style="color:#5865F2; margin:10px 0 5px 0;">${userData.global_name || userData.username}</h2>
-                <p style="color:#b9bbbe; font-size:14px; margin-top:0;">@${userData.username}</p>
-                <hr style="border:0; border-top:1px solid #444; margin:20px 0;">
-                <h3 style="color:#43b581;">✅ 인증 및 역할 지급 완료</h3>
-                <p style="font-size:16px; color:#dcddde;">당신의 접속 IP: <strong style="color:#fEE75C; font-size:18px;">${userIP}</strong></p>
-                <p style="font-size:12px; color:#72767d; margin-top:10px;">${ipInfoText}</p>
-                <button onclick="window.close()" style="padding:10px 20px; margin-top:20px; font-size:16px; font-weight:bold; background:#5865F2; color:white; border:none; border-radius:5px; cursor:pointer;">창 닫기</button>
-            </div>
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>인증 완료</title>
+                <style>
+                    body { background-color: #121214; color: #e1e1e6; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                    .card { background: #202024; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.6); text-align: center; width: 440px; border: 1px solid #323238; overflow: hidden; }
+                    .banner { width: 100%; height: 110px; background-color: #5865F2; background-size: cover; background-position: center; }
+                    .avatar { width: 84px; height: 84px; border-radius: 50%; border: 4px solid #202024; margin-top: -45px; background: #2f3136; position: relative; }
+                    .content { padding: 0 30px 35px 30px; }
+                    h2 { color: #f1f1f3; margin: 12px 0 2px 0; font-size: 20px; }
+                    .tag { color: #8d8d99; font-size: 13px; margin-bottom: 20px; }
+                    .badge { display: inline-block; background: rgba(0, 179, 126, 0.15); color: #00b37e; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: bold; margin-bottom: 20px; border: 1px solid rgba(0, 179, 126, 0.3); }
+                    .info-box { background: #121214; padding: 14px; border-radius: 8px; font-size: 14px; color: #c4c4cc; border: 1px solid #29292e; text-align: left; margin-bottom: 15px; }
+                    .info-box strong { color: #fba94c; }
+                    .btn { width: 100%; padding: 12px; font-size: 15px; font-weight: bold; background: #5865F2; color: white; border: none; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+                    .btn:hover { background: #4752c4; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div class="banner" ${bannerUrl ? `style="background-image: url('${bannerUrl}');"` : ''}></div>
+                    <img src="${avatarUrl}" class="avatar">
+                    <h2>${userData.global_name || userData.username}</h2>
+                    <div class="tag">@${userData.username}</div>
+                    
+                    <div class="content">
+                        <div class="badge">✅ 인증 및 역할 지급 완료</div>
+                        <div class="info-box">
+                            <div>현재 접속 IP: <strong>${userIP}</strong></div>
+                            <div style="font-size: 12px; color: #8d8d99; margin-top: 6px;">${ipInfoText}</div>
+                        </div>
+                        <button class="btn" onclick="window.close()">창 닫기</button>
+                    </div>
+                </div>
+            </body>
+            </html>
         `);
     } catch (error) {
         console.error(error);
-        res.send('<h2 style="color:red;text-align:center;">❌ 서버와 통신 중 오류가 발생했습니다.</h2>');
+        res.send('<h2 style="color:red;text-align:center;margin-top:50px;">❌ 서버와 통신 중 오류가 발생했습니다.</h2>');
     }
 });
 
