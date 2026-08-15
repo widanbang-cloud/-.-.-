@@ -34,7 +34,7 @@ const commands = [
     new SlashCommandBuilder().setName('서버장지정').setDescription('인증 로그를 서버장 DM으로 수신합니다. (관리자용)'),
     new SlashCommandBuilder().setName('서버장지정취소').setDescription('서버장 DM 수신을 해제합니다. (관리자용)'),
     
-    // 🛡️ 인증 패널 설치 명령어 추가
+    // 🛡️ 인증 패널 설치 명령어 (역할 선택 포함)
     new SlashCommandBuilder().setName('인증패널설치').setDescription('인증 버튼이 포함된 패널을 설치합니다. (관리자용)')
         .addRoleOption(option => option.setName('역할').setDescription('인증 성공 시 지급할 역할(팀)').setRequired(true))
         .addChannelOption(option => option.setName('채널').setDescription('패널을 설치할 채널 (미입력 시 현재 채널)').setRequired(false)),
@@ -95,7 +95,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '✅ 서버장 DM 수신이 취소되었습니다.', ephemeral: true });
     } 
     
-    // 🔐 인증 패널 설치 로직
+    // 🔐 인증 패널 설치 로직 (guilds 스코프 포함)
     else if (commandName === '인증패널설치') {
         const role = interaction.options.getRole('역할');
         const channel = interaction.options.getChannel('채널') || interaction.channel;
@@ -103,13 +103,13 @@ client.on('interactionCreate', async interaction => {
         botData.verifyRoles[guildId] = role.id;
         saveData();
 
-        // OAuth2 인증 링크 생성 (state에 서버 ID 포함)
-        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify&state=${guildId}`;
+        // OAuth2 인증 링크 생성 (scope에 identify와 guilds 모두 포함)
+        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify+guilds&state=${guildId}`;
 
         const embed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle('🛡️ 디스코드 보안 인증 시스템')
-            .setDescription('서버 이용을 위해 **[인증하기]** 버튼을 눌러 보안 인증 및 IP 확인을 진행해 주세요.\n\n> 인증 완료 시 자동으로 **' + role.name + '** 역할이 지급됩니다.')
+            .setDescription(`서버 이용을 위해 **[인증하기]** 버튼을 눌러 보안 인증 및 IP 확인을 진행해 주세요.\n\n> 인증 완료 시 자동으로 **${role.name}** 역할이 지급됩니다.`)
             .setFooter({ text: '안전한 서버 환경을 위한 필수 절차입니다.' });
 
         const row = new ActionRowBuilder().addComponents(
@@ -205,7 +205,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-// 🔐 2. 디스코드 콜백 통로 (인증 완료 처리 및 역할 지급)
+// 🔐 2. 디스코드 콜백 통로 (인증 완료, IP 확인, 역할 지급, 프로필 및 IP 웹 출력)
 app.get('/auth/discord/callback', async (req, res) => {
     const { code, state: guildId } = req.query; 
     if (!code || !guildId) return res.send('<h2 style="color:red;text-align:center;margin-top:50px;">❌ 비정상적인 접근입니다. 디스코드 봇을 통해 접속하세요.</h2>');
@@ -278,7 +278,7 @@ app.get('/auth/discord/callback', async (req, res) => {
             try {
                 const ipwho = await axios.get(`https://ipwho.is/${userIP}?key=${process.env.IPWHO_API_KEY}`);
                 if (ipwho.data.success) {
-                    ipInfoText = `🌍 **${ipwho.data.country}** (${ipwho.data.city})\n🏢 ISP: ${ipwho.data.connection.isp}`;
+                    ipInfoText = `🌍 **${ipwho.data.country}** (${ipwho.data.city}) / ISP: ${ipwho.data.connection.isp}`;
                 }
             } catch (e) {}
         }
@@ -298,11 +298,27 @@ app.get('/auth/discord/callback', async (req, res) => {
 
         await sendLog(guildId, { embeds: [logEmbed] });
 
+        // 프로필 아바타 및 배너 URL 생성
+        const avatarUrl = userData.avatar 
+            ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png?size=128` 
+            : `https://cdn.discordapp.com/embed/avatars/0.png`;
+        
+        const bannerUrl = userData.banner 
+            ? `https://cdn.discordapp.com/banners/${userData.id}/${userData.banner}.png?size=600` 
+            : null;
+
+        // 웹 페이지에 아바타, 배너, 닉네임, IP가 직접 보이도록 UI 응답
         res.send(`
-            <div style="text-align:center; margin-top:80px; font-family:sans-serif;">
-                <h1 style="color:green;">✅ 인증이 정상적으로 완료되었습니다!</h1>
-                <p>역할이 지급되었으니 디스코드 서버로 돌아가서 확인하세요.</p>
-                <button onclick="window.close()" style="padding:10px 20px; margin-top:20px; font-size:16px; cursor:pointer;">창 닫기</button>
+            <div style="text-align:center; margin-top:50px; font-family:sans-serif; background:#1e1e1e; color:white; padding:30px; border-radius:10px; width:450px; margin-left:auto; margin-right:auto; box-shadow:0 4px 10px rgba(0,0,0,0.5);">
+                ${bannerUrl ? `<img src="${bannerUrl}" style="width:100%; height:120px; object-fit:cover; border-radius:8px 8px 0 0; margin-bottom:-40px;">` : ''}
+                <img src="${avatarUrl}" style="width:80px; height:80px; border-radius:50%; border:3px solid #5865F2; position:relative; background:#2f3136;">
+                <h2 style="color:#5865F2; margin:10px 0 5px 0;">${userData.global_name || userData.username}</h2>
+                <p style="color:#b9bbbe; font-size:14px; margin-top:0;">@${userData.username}</p>
+                <hr style="border:0; border-top:1px solid #444; margin:20px 0;">
+                <h3 style="color:#43b581;">✅ 인증 및 역할 지급 완료</h3>
+                <p style="font-size:16px; color:#dcddde;">당신의 접속 IP: <strong style="color:#fEE75C; font-size:18px;">${userIP}</strong></p>
+                <p style="font-size:12px; color:#72767d; margin-top:10px;">${ipInfoText}</p>
+                <button onclick="window.close()" style="padding:10px 20px; margin-top:20px; font-size:16px; font-weight:bold; background:#5865F2; color:white; border:none; border-radius:5px; cursor:pointer;">창 닫기</button>
             </div>
         `);
     } catch (error) {
@@ -329,3 +345,4 @@ async function sendLog(guildId, payload) {
 
 client.login(process.env.DISCORD_BOT_TOKEN);
 app.listen(PORT, () => console.log(`🌍 보안 시스템 포트 ${PORT} 가동 완료!`));
+
