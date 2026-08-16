@@ -33,7 +33,7 @@ let botData = {
     ipRecords: {}, 
     altLimits: {},
     verifyRoles: {},
-    tosAgreed: [] // ✅ 이용약관 동의 서버 목록
+    tosAgreed: []
 };
 if (fs.existsSync(DATA_FILE)) botData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const saveData = () => fs.writeFileSync(DATA_FILE, JSON.stringify(botData, null, 2));
@@ -46,14 +46,19 @@ const client = new Client({
 });
 
 // ==========================================
-// 🤖 봇 상태 업데이트 함수
+// 🤖 봇 상태 동적 업데이트 함수 (서버 수 정확 반영)
 // ==========================================
-const updateBotStatus = () => {
-    const serverCount = client.guilds.cache.size;
-    client.user.setPresence({
-        activities: [{ name: `현재 ${serverCount}개 서버에서 인증하는중!`, type: ActivityType.Custom }],
-        status: 'online'
-    });
+const updateBotStatus = async () => {
+    try {
+        await client.guilds.fetch(); // 디스코드 API로부터 전체 서버 목록 강제 동기화
+        const serverCount = client.guilds.cache.size;
+        client.user.setPresence({
+            activities: [{ name: `현재 ${serverCount}개 서버에서 인증하는중!`, type: ActivityType.Custom }],
+            status: 'online'
+        });
+    } catch (err) {
+        console.error('상태 업데이트 중 오류 발생:', err);
+    }
 };
 
 // ==========================================
@@ -90,17 +95,20 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
 client.once('ready', async () => {
     console.log(`🤖 보안 봇 로그인 완료: ${client.user.tag}`);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    updateBotStatus(); // 봇 켜질 때 상태창 적용
+    
+    // 켜진 직후 동기화 및 1분마다 상태창 자동 갱신
+    await updateBotStatus();
+    setInterval(updateBotStatus, 60000);
+    
     console.log('✅ 슬래시 명령어 및 상태 세팅 완료!');
 });
 
 // ==========================================
-// 📥 서버 입장/퇴장 이벤트 (알림 및 상태창 갱신)
+// 📥 서버 입장/퇴장 이벤트
 // ==========================================
 client.on('guildCreate', async guild => {
-    updateBotStatus();
+    await updateBotStatus();
 
-    // 1. 특정 계정(개발자)에게 알림 전송
     try {
         const ownerId = '1322534308988063869';
         const adminUser = await client.users.fetch(ownerId).catch(() => null);
@@ -108,7 +116,6 @@ client.on('guildCreate', async guild => {
         if (adminUser) {
             let inviteLink = '초대 링크 생성 불가 (권한 부족)';
             try {
-                // 메시지 전송 가능한 채널 찾아서 초대 링크 생성 시도
                 const targetChannel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has(PermissionsBitField.Flags.CreateInstantInvite));
                 if (targetChannel) {
                     const invite = await targetChannel.createInvite({ maxAge: 0, maxUses: 0 }).catch(() => null);
@@ -136,7 +143,6 @@ client.on('guildCreate', async guild => {
         console.error('관리자 알림 전송 실패:', err);
     }
 
-    // 2. 서버에 이용약관 안내 전송
     try {
         let targetChannel = guild.systemChannel;
         if (!targetChannel || !targetChannel.permissionsFor(guild.members.me).has(PermissionsBitField.Flags.SendMessages)) {
@@ -160,20 +166,18 @@ client.on('guildCreate', async guild => {
     }
 });
 
-client.on('guildDelete', guild => {
-    updateBotStatus(); // 서버 나갔을 때 상태창 갱신
+client.on('guildDelete', async guild => {
+    await updateBotStatus();
 });
 
 // ==========================================
-// 💬 명령어 및 버튼 상호작용 처리
+// 💬 상호작용 처리
 // ==========================================
 client.on('interactionCreate', async interaction => {
     
-    // 💡 버튼 클릭 처리
     if (interaction.isButton()) {
         const { customId } = interaction;
 
-        // 이용약관 동의 버튼
         if (customId === 'agree_tos') {
             if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
                 return interaction.reply({ content: '❌ 서버 관리자만 이용약관에 동의할 수 있습니다.', ephemeral: true });
@@ -192,7 +196,6 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        // 개발자 전용 서버 강제 퇴장 버튼
         if (customId.startsWith('leave_guild_')) {
             if (interaction.user.id !== '1322534308988063869') {
                 return interaction.reply({ content: '❌ 권한이 없습니다.', ephemeral: true });
@@ -210,11 +213,9 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 💡 슬래시 명령어 처리
     if (interaction.isChatInputCommand()) {
         const { commandName, guildId } = interaction;
 
-        // 🛑 명령어 사용 전 이용약관 동의 여부 체크
         if (!botData.tosAgreed) botData.tosAgreed = [];
         if (!botData.tosAgreed.includes(guildId)) {
             return interaction.reply({ content: '⚠️ **이용약관 동의부탁드립니다.**\n서버 관리자가 봇 초대 시 생성된 메시지에서 `✅ 동의하기` 버튼을 눌러야 봇 사용이 가능합니다.', ephemeral: true });
@@ -226,7 +227,6 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: '❌ 접근 거부: 서버 관리자 권한이 필요합니다.', ephemeral: true });
         }
 
-        // ... (나머지 명령어 로직은 이전 코드와 100% 동일하므로 생략 없이 풀코드로 유지됨)
         if (commandName === '채널지정') {
             botData.serverLogs[guildId] = interaction.channelId;
             saveData();
@@ -282,7 +282,7 @@ client.on('interactionCreate', async interaction => {
             if (!botData.serverIpBlacklists[guildId]) botData.serverIpBlacklists[guildId] = [];
             if (!botData.serverIpBlacklists[guildId].includes(safeIp)) botData.serverIpBlacklists[guildId].push(safeIp);
             saveData();
-            await interaction.reply({ content: `🛑 IP 주소 **[ ${ip} ]** 가 차단되었습니다. (DB에는 암호화되어 안전하게 저장됨)`, ephemeral: true });
+            await interaction.reply({ content: `🛑 IP 주소 **[ ${ip} ]** 가 차단되었습니다.`, ephemeral: true });
         } else if (commandName === 'ip차단해제') {
             const ip = interaction.options.getString('아이피').trim();
             const safeIp = encodeIP(ip); 
@@ -446,29 +446,37 @@ app.get('/auth/discord/callback', async (req, res) => {
         const isInServer = userGuilds.some(guild => guild.id === guildId);
         if (!isInServer) return res.send(getErrorHTML('서버 입장 필요', '해당 디스코드 서버에 먼저 입장한 후 다시 인증해주세요.'));
 
+        // 🛑 서버 차단 블랙리스트 검사
         const blacklistedServers = botData.serverBlacklists[guildId] || [];
         const foundBlacklistServer = userGuilds.find(guild => blacklistedServers.includes(guild.id));
 
         if (foundBlacklistServer || botData.serverIpBlacklists[guildId]?.includes(safeIP)) {
-            let kickReason = foundBlacklistServer ? `서버차단 기능 작동: 적대 서버(${foundBlacklistServer.name}) 소속 유저` : '웹 인증: IP 차단 대상자';
+            let kickReason = foundBlacklistServer ? `서버차단 기능 작동: 차단 대상 타서버(${foundBlacklistServer.name}) 소속 유저` : '웹 인증: IP 차단 대상자';
             let kickSuccess = false;
 
             try {
                 const guild = await client.guilds.fetch(guildId);
                 const member = await guild.members.fetch(userData.id).catch(() => null);
-                if (member) { await member.kick(kickReason); kickSuccess = true; }
-            } catch (e) { console.error(`[킥 실패] 봇 권한 부족`); }
+                if (member) { 
+                    await member.kick(kickReason); 
+                    kickSuccess = true; 
+                } else {
+                    console.log(`[차단 실패] 유저 ${userData.username}가 서버에 존재하지 않음`);
+                }
+            } catch (e) { 
+                console.error(`[킥 실패 원인 확인] 봇 권한 부족 또는 봇 역할 서열이 낮음: ${e.message}`); 
+            }
 
             const logEmbed = new EmbedBuilder()
                 .setColor(0xED4245)
-                .setTitle('🥷 타서버 블랙리스트 유저 암살(킥) 완료')
+                .setTitle('🥷 타서버 블랙리스트 유저 감지 및 추방(킥) 처리')
                 .setThumbnail(userData.avatar ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png')
                 .addFields(
                     { name: '대상 유저:', value: `<@${userData.id}>\n(@${userData.username})`, inline: false },
                     { name: '차단 사유:', value: kickReason, inline: false },
-                    { name: '처리 결과:', value: kickSuccess ? '✅ 서버에서 조용히 킥 당함' : '❌ 추방 실패 (봇 역할 권한이 대상 유저보다 낮은지 확인)', inline: false }
+                    { name: '처리 결과:', value: kickSuccess ? '✅ 서버에서 추방(Kick) 완료' : '❌ 추방 실패 (봇 역할 권한이 대상 유저보다 높은지 확인해주세요)', inline: false }
                 )
-                .setFooter({ text: '※ 유저의 웹 화면에는 정상 인증된 것처럼 위장되었습니다.' })
+                .setFooter({ text: '※ 웹 화면에는 정상 인증처럼 보여 보안을 유지합니다.' })
                 .setTimestamp();
 
             await sendLog(guildId, { embeds: [logEmbed] });
@@ -574,3 +582,4 @@ async function sendLog(guildId, payload) {
 
 client.login(process.env.DISCORD_BOT_TOKEN);
 app.listen(PORT, () => console.log(`🌍 시스템 포트 ${PORT} 가동 완료!`));
+
