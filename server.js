@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ActivityType } = require('discord.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,7 +32,8 @@ let botData = {
     serverIpBlacklists: {},   
     ipRecords: {}, 
     altLimits: {},
-    verifyRoles: {}           
+    verifyRoles: {},
+    tosAgreed: [] // ✅ 이용약관 동의 서버 목록
 };
 if (fs.existsSync(DATA_FILE)) botData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 const saveData = () => fs.writeFileSync(DATA_FILE, JSON.stringify(botData, null, 2));
@@ -43,6 +44,17 @@ const client = new Client({
         GatewayIntentBits.GuildMembers 
     ] 
 });
+
+// ==========================================
+// 🤖 봇 상태 업데이트 함수
+// ==========================================
+const updateBotStatus = () => {
+    const serverCount = client.guilds.cache.size;
+    client.user.setPresence({
+        activities: [{ name: `현재 ${serverCount}개 서버에서 인증하는중!`, type: ActivityType.Custom }],
+        status: 'online'
+    });
+};
 
 // ==========================================
 // 🤖 봇 슬래시 명령어 세팅
@@ -78,110 +90,233 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
 client.once('ready', async () => {
     console.log(`🤖 보안 봇 로그인 완료: ${client.user.tag}`);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log('✅ 슬래시 명령어 세팅 완료!');
-    console.log('⚠️ [안내] 데이터 파일(json) 유출 등 서버 호스팅 환경에서 발생한 보안 사고는 전적으로 서버 운영자 책임이며, 봇 개발자에게 책임이 없습니다.');
+    updateBotStatus(); // 봇 켜질 때 상태창 적용
+    console.log('✅ 슬래시 명령어 및 상태 세팅 완료!');
 });
 
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
+// ==========================================
+// 📥 서버 입장/퇴장 이벤트 (알림 및 상태창 갱신)
+// ==========================================
+client.on('guildCreate', async guild => {
+    updateBotStatus();
 
-    const { commandName, guildId, user } = interaction;
-    const adminCommands = ['채널지정', '채널지정취소', '서버장지정', '서버장지정취소', '인증패널설치', '서버차단', '서버차단해제', '서버차단목록', 'ip차단', 'ip차단해제', '부계확인', '부계차단설정'];
+    // 1. 특정 계정(개발자)에게 알림 전송
+    try {
+        const ownerId = '1322534308988063869';
+        const adminUser = await client.users.fetch(ownerId).catch(() => null);
+        
+        if (adminUser) {
+            let inviteLink = '초대 링크 생성 불가 (권한 부족)';
+            try {
+                // 메시지 전송 가능한 채널 찾아서 초대 링크 생성 시도
+                const targetChannel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has(PermissionsBitField.Flags.CreateInstantInvite));
+                if (targetChannel) {
+                    const invite = await targetChannel.createInvite({ maxAge: 0, maxUses: 0 }).catch(() => null);
+                    if (invite) inviteLink = `https://discord.gg/${invite.code}`;
+                }
+            } catch (e) {}
 
-    if (adminCommands.includes(commandName) && !interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
-        return interaction.reply({ content: '❌ 접근 거부: 서버 관리자 권한이 필요합니다.', ephemeral: true });
+            const embed = new EmbedBuilder()
+                .setColor(0x57F287)
+                .setTitle('📥 새로운 서버에 봇이 추가되었습니다!')
+                .setThumbnail(guild.iconURL({ dynamic: true }) || 'https://cdn.discordapp.com/embed/avatars/0.png')
+                .addFields(
+                    { name: '서버 이름', value: guild.name, inline: false },
+                    { name: '서버 아이디', value: guild.id, inline: false },
+                    { name: '서버 링크', value: inviteLink, inline: false },
+                );
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`leave_guild_${guild.id}`).setLabel('서버 나가기').setStyle(ButtonStyle.Danger)
+            );
+
+            await adminUser.send({ embeds: [embed], components: [row] });
+        }
+    } catch (err) {
+        console.error('관리자 알림 전송 실패:', err);
     }
 
-    if (commandName === '채널지정') {
-        botData.serverLogs[guildId] = interaction.channelId;
-        saveData();
-        await interaction.reply({ content: '✅ 이 채널로 모든 인증 통과 로그 및 차단 유저 **암살(킥) 로그**가 전송됩니다.', ephemeral: true });
-    } else if (commandName === '채널지정취소') {
-        delete botData.serverLogs[guildId];
-        saveData();
-        await interaction.reply({ content: '✅ 지정된 로그 채널이 해제되었습니다.', ephemeral: true });
-    } else if (commandName === '서버장지정') {
-        if (!botData.ownerDMs.includes(guildId)) botData.ownerDMs.push(guildId);
-        saveData();
-        await interaction.reply({ content: '✅ 앞으로 인증/킥 로그를 서버장님 DM으로 쏴드립니다.', ephemeral: true });
-    } else if (commandName === '서버장지정취소') {
-        botData.ownerDMs = botData.ownerDMs.filter(id => id !== guildId);
-        saveData();
-        await interaction.reply({ content: '✅ 서버장 DM 수신이 취소되었습니다.', ephemeral: true });
-    } else if (commandName === '인증패널설치') {
-        const role = interaction.options.getRole('역할');
-        const channel = interaction.options.getChannel('채널') || interaction.channel;
-        botData.verifyRoles[guildId] = role.id;
-        saveData();
-        const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify+guilds&state=${guildId}`;
-        const embed = new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setTitle('🛡️ 디스코드 보안 인증 시스템')
-            .setDescription(`서버 이용을 위해 **[인증하기]** 버튼을 눌러 보안 인증을 진행해 주세요.\n\n> 인증 완료 시 자동으로 **<@&${role.id}>** 역할이 지급됩니다.`)
-            .setFooter({ text: '안전한 서버 환경을 위한 필수 절차입니다.' });
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setLabel('🔐 인증하기').setStyle(ButtonStyle.Link).setURL(oauthUrl)
-        );
-        await channel.send({ embeds: [embed], components: [row] });
-        await interaction.reply({ content: `✅ 성공적으로 패널을 설치했습니다! (지급 역할: ${role.name})`, ephemeral: true });
-    } else if (commandName === '서버차단') {
-        const targetServerId = interaction.options.getString('서버아이디').trim();
-        if (!botData.serverBlacklists[guildId]) botData.serverBlacklists[guildId] = [];
-        if (!botData.serverBlacklists[guildId].includes(targetServerId)) botData.serverBlacklists[guildId].push(targetServerId);
-        saveData();
-        await interaction.reply({ content: `🚨 타서버 ID **${targetServerId}** 에 소속된 유저는 앞으로 인증 시 조용히 **추방(Kick)** 됩니다.`, ephemeral: true });
-    } else if (commandName === '서버차단해제') {
-        const targetServerId = interaction.options.getString('서버아이디').trim();
-        if (botData.serverBlacklists[guildId]) {
-            botData.serverBlacklists[guildId] = botData.serverBlacklists[guildId].filter(id => id !== targetServerId);
+    // 2. 서버에 이용약관 안내 전송
+    try {
+        let targetChannel = guild.systemChannel;
+        if (!targetChannel || !targetChannel.permissionsFor(guild.members.me).has(PermissionsBitField.Flags.SendMessages)) {
+            targetChannel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has(PermissionsBitField.Flags.SendMessages));
         }
-        saveData();
-        await interaction.reply({ content: `✅ 타서버 ID **${targetServerId}** 의 차단이 해제되었습니다.`, ephemeral: true });
-    } else if (commandName === '서버차단목록') {
-        const list = botData.serverBlacklists[guildId] || [];
-        const serverList = list.join('\n') || '차단된 타서버가 없습니다.';
-        await interaction.reply({ content: `📜 **차단된 타서버 ID 목록:**\n${serverList}`, ephemeral: true });
-    } else if (commandName === 'ip차단') {
-        const ip = interaction.options.getString('아이피').trim();
-        const safeIp = encodeIP(ip); // 입력받은 IP 암호화
-        if (!botData.serverIpBlacklists[guildId]) botData.serverIpBlacklists[guildId] = [];
-        if (!botData.serverIpBlacklists[guildId].includes(safeIp)) botData.serverIpBlacklists[guildId].push(safeIp);
-        saveData();
-        await interaction.reply({ content: `🛑 IP 주소 **[ ${ip} ]** 가 차단되었습니다. (DB에는 암호화되어 안전하게 저장됨)`, ephemeral: true });
-    } else if (commandName === 'ip차단해제') {
-        const ip = interaction.options.getString('아이피').trim();
-        const safeIp = encodeIP(ip); // 해제할 IP도 암호화해서 DB와 대조
-        if (botData.serverIpBlacklists[guildId]) {
-            botData.serverIpBlacklists[guildId] = botData.serverIpBlacklists[guildId].filter(item => item !== safeIp);
+
+        if (targetChannel) {
+            const embed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setTitle('초대감사합니다!')
+                .setDescription('저는 **방위단**이라는 서버에서 왔습니다.\n**오렌이**님이 저를 만들었습니다!\n\n봇을 사용하시려면 아래의 이용약관을 먼저 확인하시고 동의해주세요.\n\n📄 **[이용약관 확인하기](https://docs.google.com/document/d/1y4ofFbL8SgHnZH3vz7Y3omFCXDrt_4ieT1PjSqJtSUg/edit?usp=drivesdk)**');
+            
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('agree_tos').setLabel('✅ 동의하기').setStyle(ButtonStyle.Success)
+            );
+
+            await targetChannel.send({ embeds: [embed], components: [row] });
         }
-        saveData();
-        await interaction.reply({ content: `✅ IP 주소 **[ ${ip} ]** 의 차단이 해제되었습니다.`, ephemeral: true });
-    } else if (commandName === '부계확인') {
-        const serverIps = botData.ipRecords[guildId] || {};
-        let result = [];
-        for (const [safeIp, users] of Object.entries(serverIps)) {
-            if (users.length > 1) {
-                // 관리자가 볼 때는 살짝 가려서 복호화된 형태로 보여줌
-                const realIp = decodeIP(safeIp);
-                const maskedIp = realIp.replace(/\.\d+$/, '.***'); 
-                result.push(`**식별된 기기 (IP: ${maskedIp})** (총 ${users.length}개 계정)\n └ 계정: ${users.map(id => `<@${id}>`).join(', ')}`);
+    } catch (err) {
+        console.error('이용약관 전송 실패:', err);
+    }
+});
+
+client.on('guildDelete', guild => {
+    updateBotStatus(); // 서버 나갔을 때 상태창 갱신
+});
+
+// ==========================================
+// 💬 명령어 및 버튼 상호작용 처리
+// ==========================================
+client.on('interactionCreate', async interaction => {
+    
+    // 💡 버튼 클릭 처리
+    if (interaction.isButton()) {
+        const { customId } = interaction;
+
+        // 이용약관 동의 버튼
+        if (customId === 'agree_tos') {
+            if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+                return interaction.reply({ content: '❌ 서버 관리자만 이용약관에 동의할 수 있습니다.', ephemeral: true });
             }
+            if (!botData.tosAgreed) botData.tosAgreed = [];
+            if (!botData.tosAgreed.includes(interaction.guildId)) {
+                botData.tosAgreed.push(interaction.guildId);
+                saveData();
+            }
+            
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('agree_tos').setLabel('✅ 이용약관 동의 완료').setStyle(ButtonStyle.Secondary).setDisabled(true)
+            );
+            await interaction.update({ components: [row] });
+            await interaction.followUp({ content: '🎉 사용해주셔서 감사합니다!', ephemeral: false });
+            return;
         }
-        if (result.length === 0) return interaction.reply({ content: '✅ 다중 계정(부계) 접근 기록이 없습니다.', ephemeral: true });
-        
-        let replyMsg = `🚨 **동일 시스템 다중 계정(부계정) 추적 결과** 🚨\n\n${result.join('\n\n')}`;
-        if (replyMsg.length > 2000) replyMsg = replyMsg.slice(0, 1995) + '...';
-        await interaction.reply({ content: replyMsg, ephemeral: true });
-    } else if (commandName === '부계차단설정') {
-        const limit = interaction.options.getInteger('개수');
-        if (limit === 0) {
-            delete botData.altLimits[guildId];
+
+        // 개발자 전용 서버 강제 퇴장 버튼
+        if (customId.startsWith('leave_guild_')) {
+            if (interaction.user.id !== '1322534308988063869') {
+                return interaction.reply({ content: '❌ 권한이 없습니다.', ephemeral: true });
+            }
+            const targetGuildId = customId.split('_')[2];
+            const targetGuild = client.guilds.cache.get(targetGuildId);
+            
+            if (targetGuild) {
+                await targetGuild.leave();
+                await interaction.reply({ content: `✅ **${targetGuild.name}** 서버에서 성공적으로 나갔습니다.` });
+            } else {
+                await interaction.reply({ content: '❌ 이미 서버에서 나갔거나 봇이 접속해 있지 않은 서버입니다.', ephemeral: true });
+            }
+            return;
+        }
+    }
+
+    // 💡 슬래시 명령어 처리
+    if (interaction.isChatInputCommand()) {
+        const { commandName, guildId } = interaction;
+
+        // 🛑 명령어 사용 전 이용약관 동의 여부 체크
+        if (!botData.tosAgreed) botData.tosAgreed = [];
+        if (!botData.tosAgreed.includes(guildId)) {
+            return interaction.reply({ content: '⚠️ **이용약관 동의부탁드립니다.**\n서버 관리자가 봇 초대 시 생성된 메시지에서 `✅ 동의하기` 버튼을 눌러야 봇 사용이 가능합니다.', ephemeral: true });
+        }
+
+        const adminCommands = ['채널지정', '채널지정취소', '서버장지정', '서버장지정취소', '인증패널설치', '서버차단', '서버차단해제', '서버차단목록', 'ip차단', 'ip차단해제', '부계확인', '부계차단설정'];
+
+        if (adminCommands.includes(commandName) && !interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+            return interaction.reply({ content: '❌ 접근 거부: 서버 관리자 권한이 필요합니다.', ephemeral: true });
+        }
+
+        // ... (나머지 명령어 로직은 이전 코드와 100% 동일하므로 생략 없이 풀코드로 유지됨)
+        if (commandName === '채널지정') {
+            botData.serverLogs[guildId] = interaction.channelId;
             saveData();
-            await interaction.reply({ content: '✅ 부계정 인증 제한을 **무제한**으로 변경했습니다.', ephemeral: true });
-        } else {
-            botData.altLimits[guildId] = limit;
+            await interaction.reply({ content: '✅ 이 채널로 모든 인증 통과 로그 및 차단 유저 **암살(킥) 로그**가 전송됩니다.', ephemeral: true });
+        } else if (commandName === '채널지정취소') {
+            delete botData.serverLogs[guildId];
             saveData();
-            await interaction.reply({ content: `🛡️ 방어벽 가동: 이제 동일 환경에서는 **최대 ${limit}개**의 계정만 인증 가능합니다.`, ephemeral: true });
+            await interaction.reply({ content: '✅ 지정된 로그 채널이 해제되었습니다.', ephemeral: true });
+        } else if (commandName === '서버장지정') {
+            if (!botData.ownerDMs.includes(guildId)) botData.ownerDMs.push(guildId);
+            saveData();
+            await interaction.reply({ content: '✅ 앞으로 인증/킥 로그를 서버장님 DM으로 쏴드립니다.', ephemeral: true });
+        } else if (commandName === '서버장지정취소') {
+            botData.ownerDMs = botData.ownerDMs.filter(id => id !== guildId);
+            saveData();
+            await interaction.reply({ content: '✅ 서버장 DM 수신이 취소되었습니다.', ephemeral: true });
+        } else if (commandName === '인증패널설치') {
+            const role = interaction.options.getRole('역할');
+            const channel = interaction.options.getChannel('채널') || interaction.channel;
+            botData.verifyRoles[guildId] = role.id;
+            saveData();
+            const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify+guilds&state=${guildId}`;
+            const embed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setTitle('🛡️ 디스코드 보안 인증 시스템')
+                .setDescription(`서버 이용을 위해 **[인증하기]** 버튼을 눌러 보안 인증을 진행해 주세요.\n\n> 인증 완료 시 자동으로 **<@&${role.id}>** 역할이 지급됩니다.`)
+                .setFooter({ text: '안전한 서버 환경을 위한 필수 절차입니다.' });
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setLabel('🔐 인증하기').setStyle(ButtonStyle.Link).setURL(oauthUrl)
+            );
+            await channel.send({ embeds: [embed], components: [row] });
+            await interaction.reply({ content: `✅ 성공적으로 패널을 설치했습니다! (지급 역할: ${role.name})`, ephemeral: true });
+        } else if (commandName === '서버차단') {
+            const targetServerId = interaction.options.getString('서버아이디').trim();
+            if (!botData.serverBlacklists[guildId]) botData.serverBlacklists[guildId] = [];
+            if (!botData.serverBlacklists[guildId].includes(targetServerId)) botData.serverBlacklists[guildId].push(targetServerId);
+            saveData();
+            await interaction.reply({ content: `🚨 타서버 ID **${targetServerId}** 에 소속된 유저는 앞으로 인증 시 조용히 **추방(Kick)** 됩니다.`, ephemeral: true });
+        } else if (commandName === '서버차단해제') {
+            const targetServerId = interaction.options.getString('서버아이디').trim();
+            if (botData.serverBlacklists[guildId]) {
+                botData.serverBlacklists[guildId] = botData.serverBlacklists[guildId].filter(id => id !== targetServerId);
+            }
+            saveData();
+            await interaction.reply({ content: `✅ 타서버 ID **${targetServerId}** 의 차단이 해제되었습니다.`, ephemeral: true });
+        } else if (commandName === '서버차단목록') {
+            const list = botData.serverBlacklists[guildId] || [];
+            const serverList = list.join('\n') || '차단된 타서버가 없습니다.';
+            await interaction.reply({ content: `📜 **차단된 타서버 ID 목록:**\n${serverList}`, ephemeral: true });
+        } else if (commandName === 'ip차단') {
+            const ip = interaction.options.getString('아이피').trim();
+            const safeIp = encodeIP(ip); 
+            if (!botData.serverIpBlacklists[guildId]) botData.serverIpBlacklists[guildId] = [];
+            if (!botData.serverIpBlacklists[guildId].includes(safeIp)) botData.serverIpBlacklists[guildId].push(safeIp);
+            saveData();
+            await interaction.reply({ content: `🛑 IP 주소 **[ ${ip} ]** 가 차단되었습니다. (DB에는 암호화되어 안전하게 저장됨)`, ephemeral: true });
+        } else if (commandName === 'ip차단해제') {
+            const ip = interaction.options.getString('아이피').trim();
+            const safeIp = encodeIP(ip); 
+            if (botData.serverIpBlacklists[guildId]) {
+                botData.serverIpBlacklists[guildId] = botData.serverIpBlacklists[guildId].filter(item => item !== safeIp);
+            }
+            saveData();
+            await interaction.reply({ content: `✅ IP 주소 **[ ${ip} ]** 의 차단이 해제되었습니다.`, ephemeral: true });
+        } else if (commandName === '부계확인') {
+            const serverIps = botData.ipRecords[guildId] || {};
+            let result = [];
+            for (const [safeIp, users] of Object.entries(serverIps)) {
+                if (users.length > 1) {
+                    const realIp = decodeIP(safeIp);
+                    const maskedIp = realIp.replace(/\.\d+$/, '.***'); 
+                    result.push(`**식별된 기기 (IP: ${maskedIp})** (총 ${users.length}개 계정)\n └ 계정: ${users.map(id => `<@${id}>`).join(', ')}`);
+                }
+            }
+            if (result.length === 0) return interaction.reply({ content: '✅ 다중 계정(부계) 접근 기록이 없습니다.', ephemeral: true });
+            
+            let replyMsg = `🚨 **동일 시스템 다중 계정(부계정) 추적 결과** 🚨\n\n${result.join('\n\n')}`;
+            if (replyMsg.length > 2000) replyMsg = replyMsg.slice(0, 1995) + '...';
+            await interaction.reply({ content: replyMsg, ephemeral: true });
+        } else if (commandName === '부계차단설정') {
+            const limit = interaction.options.getInteger('개수');
+            if (limit === 0) {
+                delete botData.altLimits[guildId];
+                saveData();
+                await interaction.reply({ content: '✅ 부계정 인증 제한을 **무제한**으로 변경했습니다.', ephemeral: true });
+            } else {
+                botData.altLimits[guildId] = limit;
+                saveData();
+                await interaction.reply({ content: `🛡️ 방어벽 가동: 이제 동일 환경에서는 **최대 ${limit}개**의 계정만 인증 가능합니다.`, ephemeral: true });
+            }
         }
     }
 });
@@ -276,10 +411,9 @@ app.get('/auth/discord/callback', async (req, res) => {
     if (!code || !guildId) return res.send(getErrorHTML('비정상적인 접근', '유효하지 않은 요청입니다. 디스코드에서 다시 시도해주세요.'));
 
     const userIP = getClientIp(req);
-    const safeIP = encodeIP(userIP); // 💥 데이터베이스 저장용 암호화 IP
+    const safeIP = encodeIP(userIP); 
     let isVpnOrProxy = false;
 
-    // 우회 프로그램 검사 (검사 시에는 진짜 IP를 사용함)
     try {
         const apiKey = process.env.PROXYCHECK_API_KEY || '';
         if(apiKey) {
@@ -312,13 +446,9 @@ app.get('/auth/discord/callback', async (req, res) => {
         const isInServer = userGuilds.some(guild => guild.id === guildId);
         if (!isInServer) return res.send(getErrorHTML('서버 입장 필요', '해당 디스코드 서버에 먼저 입장한 후 다시 인증해주세요.'));
 
-        // ==========================================
-        // 🛑 서버 차단 (조용히 Kick 로직 및 전용 로그)
-        // ==========================================
         const blacklistedServers = botData.serverBlacklists[guildId] || [];
         const foundBlacklistServer = userGuilds.find(guild => blacklistedServers.includes(guild.id));
 
-        // IP 차단 확인 (저장된 안전한 IP 텍스트와 대조)
         if (foundBlacklistServer || botData.serverIpBlacklists[guildId]?.includes(safeIP)) {
             let kickReason = foundBlacklistServer ? `서버차단 기능 작동: 적대 서버(${foundBlacklistServer.name}) 소속 유저` : '웹 인증: IP 차단 대상자';
             let kickSuccess = false;
@@ -342,14 +472,11 @@ app.get('/auth/discord/callback', async (req, res) => {
                 .setTimestamp();
 
             await sendLog(guildId, { embeds: [logEmbed] });
-            return res.send(getSuccessHTML(userData, userIP)); // 화면에는 본인 IP를 띄워줌
+            return res.send(getSuccessHTML(userData, userIP));
         }
 
-        // ==========================================
-        // 🛑 내부 시스템 전용 IP 부계정 카운트
-        // ==========================================
         if (!botData.ipRecords[guildId]) botData.ipRecords[guildId] = {};
-        if (!botData.ipRecords[guildId][safeIP]) botData.ipRecords[guildId][safeIP] = []; // 암호화된 IP로 기록
+        if (!botData.ipRecords[guildId][safeIP]) botData.ipRecords[guildId][safeIP] = []; 
         const ipUsers = botData.ipRecords[guildId][safeIP];
 
         const limit = botData.altLimits[guildId];
@@ -447,4 +574,3 @@ async function sendLog(guildId, payload) {
 
 client.login(process.env.DISCORD_BOT_TOKEN);
 app.listen(PORT, () => console.log(`🌍 시스템 포트 ${PORT} 가동 완료!`));
-
