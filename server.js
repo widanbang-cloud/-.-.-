@@ -41,7 +41,8 @@ const saveData = () => fs.writeFileSync(DATA_FILE, JSON.stringify(botData, null,
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMembers 
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages // ✅ 메시지 감지를 위해 추가된 인텐트
     ] 
 });
 
@@ -104,13 +105,30 @@ client.once('ready', async () => {
 });
 
 // ==========================================
+// 💬 채팅 감지 이벤트 (봇 멘션 시 응답)
+// ==========================================
+client.on('messageCreate', async message => {
+    // 봇이 보낸 메시지 무시
+    if (message.author.bot) return;
+
+    // 본인(봇)이 멘션되었는지 확인
+    if (message.mentions.users.has(client.user.id)) {
+        try {
+            await message.reply('안녕하세요 저는 지금 인증하고있어요!');
+        } catch (e) {
+            console.error('멘션 응답 전송 오류:', e);
+        }
+    }
+});
+
+// ==========================================
 // 📥 서버 입장/퇴장 이벤트
 // ==========================================
 client.on('guildCreate', async guild => {
     await updateBotStatus();
 
     try {
-        const ownerId = '1322534308988063869';
+        const ownerId = '1322534308988063869'; // 개발자 ID
         const adminUser = await client.users.fetch(ownerId).catch(() => null);
         
         if (adminUser) {
@@ -128,9 +146,10 @@ client.on('guildCreate', async guild => {
                 .setTitle('📥 새로운 서버에 봇이 추가되었습니다!')
                 .setThumbnail(guild.iconURL({ dynamic: true }) || 'https://cdn.discordapp.com/embed/avatars/0.png')
                 .addFields(
-                    { name: '서버 이름', value: guild.name, inline: false },
-                    { name: '서버 아이디', value: guild.id, inline: false },
-                    { name: '서버 링크', value: inviteLink, inline: false },
+                    { name: '서버 이름', value: guild.name, inline: true },
+                    { name: '서버 아이디', value: guild.id, inline: true },
+                    { name: '👥 서버 인원 수', value: `${guild.memberCount}명`, inline: true },
+                    { name: '🔗 서버 링크', value: inviteLink, inline: false },
                 );
 
             const row = new ActionRowBuilder().addComponents(
@@ -446,7 +465,6 @@ app.get('/auth/discord/callback', async (req, res) => {
         const isInServer = userGuilds.some(guild => guild.id === guildId);
         if (!isInServer) return res.send(getErrorHTML('서버 입장 필요', '해당 디스코드 서버에 먼저 입장한 후 다시 인증해주세요.'));
 
-        // 🛑 서버 차단 블랙리스트 검사
         const blacklistedServers = botData.serverBlacklists[guildId] || [];
         const foundBlacklistServer = userGuilds.find(guild => blacklistedServers.includes(guild.id));
 
