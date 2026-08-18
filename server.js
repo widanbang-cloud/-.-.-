@@ -23,6 +23,11 @@ function decodeIP(encoded) {
 }
 
 // ==========================================
+// ⏱️ IP별 인증 쿨타임 관리 객체
+// ==========================================
+const authCooldowns = {};
+
+// ==========================================
 // 🗂️ 데이터베이스 세팅
 // ==========================================
 let botData = { 
@@ -42,16 +47,16 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds, 
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildMessages // ✅ 메시지 감지를 위해 추가된 인텐트
+        GatewayIntentBits.GuildMessages
     ] 
 });
 
 // ==========================================
-// 🤖 봇 상태 동적 업데이트 함수 (서버 수 정확 반영)
+// 🤖 봇 상태 동적 업데이트 함수
 // ==========================================
 const updateBotStatus = async () => {
     try {
-        await client.guilds.fetch(); // 디스코드 API로부터 전체 서버 목록 강제 동기화
+        await client.guilds.fetch();
         const serverCount = client.guilds.cache.size;
         client.user.setPresence({
             activities: [{ name: `현재 ${serverCount}개 서버에서 인증하는중!`, type: ActivityType.Custom }],
@@ -97,7 +102,6 @@ client.once('ready', async () => {
     console.log(`🤖 보안 봇 로그인 완료: ${client.user.tag}`);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
     
-    // 켜진 직후 동기화 및 1분마다 상태창 자동 갱신
     await updateBotStatus();
     setInterval(updateBotStatus, 60000);
     
@@ -108,10 +112,8 @@ client.once('ready', async () => {
 // 💬 채팅 감지 이벤트 (봇 멘션 시 응답)
 // ==========================================
 client.on('messageCreate', async message => {
-    // 봇이 보낸 메시지 무시
     if (message.author.bot) return;
 
-    // 본인(봇)이 멘션되었는지 확인
     if (message.mentions.users.has(client.user.id)) {
         try {
             await message.reply('안녕하세요 저는 지금 인증하고있어요!');
@@ -128,7 +130,7 @@ client.on('guildCreate', async guild => {
     await updateBotStatus();
 
     try {
-        const ownerId = '1322534308988063869'; // 개발자 ID
+        const ownerId = '1322534308988063869'; 
         const adminUser = await client.users.fetch(ownerId).catch(() => null);
         
         if (adminUser) {
@@ -430,6 +432,21 @@ app.get('/auth/discord/callback', async (req, res) => {
     if (!code || !guildId) return res.send(getErrorHTML('비정상적인 접근', '유효하지 않은 요청입니다. 디스코드에서 다시 시도해주세요.'));
 
     const userIP = getClientIp(req);
+    const now = Date.now();
+    const COOLDOWN_MS = 60 * 1000; // 1분 쿨타임
+
+    // 🛑 [쿨타임 시스템] 디스코드 API에 스팸 요청 전 차단
+    if (authCooldowns[userIP] && (now - authCooldowns[userIP]) < COOLDOWN_MS) {
+        const remainingSec = Math.ceil((COOLDOWN_MS - (now - authCooldowns[userIP])) / 1000);
+        return res.send(getErrorHTML(
+            '요청 제한 (쿨타임)', 
+            `너무 빠르게 연속으로 인증을 시도하셨습니다.<br><br><b style="color:#57F287; font-size:18px;">${remainingSec}초</b> 후 디스코드에서 다시 인증 버튼을 눌러주세요.`, 
+            '⏳'
+        ));
+    }
+
+    authCooldowns[userIP] = now;
+
     const safeIP = encodeIP(userIP); 
     let isVpnOrProxy = false;
 
